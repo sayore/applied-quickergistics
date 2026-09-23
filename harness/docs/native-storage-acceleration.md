@@ -145,13 +145,28 @@ harness/run.sh
 merged Java result across mounts, unmounts, mutations, reprioritisation, 500 random mutations, and the
 unversioned-storage fallback. It exits non-zero on any mismatch.
 
-### A note on the Gradle `test` task
+### Tests against real AE2 classes
 
-`ae2-src/src/test/java/appeng/me/storage/RustStorageIndexTest.java` contains the same integration
-checks as a JUnit test. It compiles, but running it through `./gradlew :test` currently fails with
-`build/classes/java/main is not a valid mod file` — NeoForge's FML test harness refuses to start with a
-classes directory as the mod source. That is a pre-existing tooling limitation, not a failure of this
-feature; `harness/run.sh` covers the same ground outside the FML harness.
+`ae2-src/src/test/java/appeng/me/storage/RustRealCellTest.java` runs the mirror against **real** AE2
+storage cells rather than test doubles. It uses `@BootstrapMinecraft` and
+`EphemeralTestServerProvider`, so it needs no GPU and no server boot:
+
+```bash
+cd ae2-src
+./gradlew :test --tests "appeng.me.storage.*"
+```
+
+It builds a 64k item cell through `BasicCellInventory`, wraps it in a `DriveWatcher` the way a drive
+does, mounts it next to a second cell and asserts that the mirror's aggregate equals the merged Java
+result. It then mutates the cell behind the network's back (two inserts and an extract, which is what
+an IO port or a crafting CPU does) and checks both the aggregate and a simulated extraction.
+
+For a long time no test could run at all: the mod build did not copy `src/main/resources` into the
+build output, so `ae2.mixins.json` and `META-INF/neoforge.mods.toml` never reached the runtime
+classpath and FML rejected the mod with `build/classes/java/main is not a valid mod file`. That was a
+regression from the Rust build plugin registering `rust/` as a resource source directory of the main
+source set. It is fixed; `harness/run.sh` remains useful for the microbenchmarks, which do not need
+Minecraft at all.
 
 ## Troubleshooting
 
