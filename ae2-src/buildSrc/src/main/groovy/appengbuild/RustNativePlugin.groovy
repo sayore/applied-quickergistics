@@ -30,7 +30,8 @@ import java.util.Locale
 
 /**
  * Builds the optional {@code ae2store} Rust library and bundles it into the mod jar under
- * {@code /native/}.
+ * {@code /native/<os>-<arch>/}. CI can supply a directory of prebuilt libraries with
+ * {@code -PnativeArtifactsDir=...} to assemble a multi-platform jar.
  *
  * The build is optional: without a Rust toolchain the tasks are skipped and the mod runs with the
  * pure-Java storage implementation. Use {@code -PskipRust=true} (or {@code AE2_SKIP_RUST=true}) to
@@ -45,6 +46,11 @@ class RustNativePlugin implements Plugin<Project> {
     void apply(Project project) {
         var rustDir = project.layout.projectDirectory.dir("rust")
         var outputDir = project.layout.buildDirectory.dir("native")
+        var stagedPath = project.findProperty("nativeArtifactsDir")
+        var stagedDir = stagedPath ? project.file(stagedPath.toString()) : null
+        if (stagedDir != null && !stagedDir.isDirectory()) {
+            throw new GradleException("Native artifacts directory does not exist: ${stagedDir}")
+        }
 
         // All decisions are made at configuration time so the tasks stay configuration-cache safe.
         var skipped = project.hasProperty("skipRust") || "true" == System.getenv("AE2_SKIP_RUST")
@@ -53,14 +59,15 @@ class RustNativePlugin implements Plugin<Project> {
         var cargo = hasRustSources ? findCargo() : null
         var cargoAvailable = cargo != null
 
-        if (required && !cargoAvailable) {
+        var platform = platformId()
+        if (required && stagedDir == null && (!cargoAvailable || platform == null)) {
             throw new GradleException(
                     "Native ae2store build was required, but cargo is unavailable " +
                             "(skipped=${skipped}, sources=${hasRustSources})")
         }
 
-        var nativeBuildRequested = !skipped && cargoAvailable
-        if (!nativeBuildRequested) {
+        var nativeBuildRequested = stagedDir == null && !skipped && cargoAvailable && platform != null
+        if (!nativeBuildRequested && stagedDir == null) {
             project.logger.lifecycle(
                     "Native ae2store acceleration will not be built " +
                             "(cargo: ${cargo}, skipped: ${skipped}); " +
@@ -89,13 +96,15 @@ class RustNativePlugin implements Plugin<Project> {
             dependsOn cargoBuild
             onlyIf { nativeBuildRequested }
             from(rustDir.dir("target/release").file(libraryFileName()))
-            into(outputDir)
+            into(outputDir.map { it.dir(platform) })
         }
 
         project.plugins.withType(org.gradle.api.plugins.JavaPlugin) {
             project.tasks.named("processResources") {
-                dependsOn copyNativeLibrary
-                from(outputDir) {
+                if (stagedDir == null) {
+                    dependsOn copyNativeLibrary
+                }
+                from(stagedDir ?: outputDir) {
                     into RESOURCE_DIR
                 }
             }
@@ -108,12 +117,12 @@ class RustNativePlugin implements Plugin<Project> {
         if (path) {
             for (entry in path.split(File.pathSeparator)) {
                 if (entry) {
-                    candidates.add(new File(entry, "cargo").absolutePath)
+                    candidates.add(new File(entry, isWindows() ? "cargo.exe" : "cargo").absolutePath)
                 }
             }
         }
         var home = System.getProperty("user.home", "")
-        candidates.add("${home}/.cargo/bin/cargo")
+        candidates.add("${home}/.cargo/bin/${isWindows() ? 'cargo.exe' : 'cargo'}")
         candidates.add("/usr/local/bin/cargo")
         candidates.add("/usr/bin/cargo")
         candidates.add("/sbin/cargo")
@@ -129,11 +138,36 @@ class RustNativePlugin implements Plugin<Project> {
 
     private static String libraryFileName() {
         var name = System.getProperty("os.name", "").toLowerCase(Locale.ROOT)
-        if (name.contains("win")) {
+        if (name.startsWith("windows")) {
             return "${LIBRARY_NAME}.dll"
         } else if (name.contains("mac") || name.contains("darwin")) {
             return "lib${LIBRARY_NAME}.dylib"
         }
         return "lib${LIBRARY_NAME}.so"
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")
+    }
+
+    private static String platformId() {
+        var os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT)
+        var arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT)
+        var normalizedArch
+        if (arch == "amd64" || arch == "x86_64") {
+            normalizedArch = "x86_64"
+        } else if (arch == "aarch64" || arch == "arm64") {
+            normalizedArch = "aarch64"
+        } else {
+            return null
+        }
+        if (os.startsWith("windows")) {
+            return "windows-${normalizedArch}"
+        } else if (os.contains("mac") || os.contains("darwin")) {
+            return "macos-${normalizedArch}"
+        } else if (os.contains("linux")) {
+            return "linux-${normalizedArch}"
+        }
+        return null
     }
 }

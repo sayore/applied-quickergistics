@@ -100,4 +100,22 @@ class DenseKeyInternerTest {
 
         assertThat(interner.idOf(new Key(new Object(), 1))).isEqualTo(-1);
     }
+
+    @Test
+    void clearRemovesPrimaryKeyMappingsAndAllowsIdsToRestart() {
+        var interner = interner();
+        var primary = new Object();
+        var oldKey = new Key(primary, 1);
+        interner.intern(oldKey);
+
+        interner.clear();
+        assertThat(interner.size()).isZero();
+        assertThat(interner.idOf(oldKey)).isEqualTo(-1);
+        assertThat(interner.idOf(new Key(primary, 2))).isEqualTo(-1);
+
+        var newKey = new Key(primary, 2);
+        assertThat(interner.internCanonical(newKey)).isSameAs(newKey);
+        assertThat(interner.keyOf(0)).isSameAs(newKey);
+        assertThat(interner.size()).isEqualTo(1);
+    }
 }

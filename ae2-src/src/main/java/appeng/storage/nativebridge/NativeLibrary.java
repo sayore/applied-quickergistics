@@ -91,8 +91,12 @@ public final class NativeLibrary {
      * @return the platform-specific file name of the native library.
      */
     public static String platformLibraryName() {
-        var os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        if (os.contains("win")) {
+        return platformLibraryName(System.getProperty("os.name", ""));
+    }
+
+    static String platformLibraryName(String osName) {
+        var os = osName.toLowerCase(Locale.ROOT);
+        if (os.startsWith("windows")) {
             return LIBRARY_NAME + ".dll";
         }
         if (os.contains("mac") || os.contains("darwin")) {
@@ -104,8 +108,39 @@ public final class NativeLibrary {
     /**
      * @return the resource path the native library is bundled under inside the mod jar.
      */
+    @Nullable
     public static String bundledResourcePath() {
-        return "/native/" + platformLibraryName();
+        return bundledResourcePath(System.getProperty("os.name", ""), System.getProperty("os.arch", ""));
+    }
+
+    @Nullable
+    static String bundledResourcePath(String osName, String archName) {
+        var platform = platformId(osName, archName);
+        return platform == null ? null : "/native/" + platform + "/" + platformLibraryName(osName);
+    }
+
+    @Nullable
+    static String platformId(String osName, String archName) {
+        var os = osName.toLowerCase(Locale.ROOT);
+        var arch = archName.toLowerCase(Locale.ROOT);
+        String normalizedArch;
+        if (arch.equals("amd64") || arch.equals("x86_64")) {
+            normalizedArch = "x86_64";
+        } else if (arch.equals("aarch64") || arch.equals("arm64")) {
+            normalizedArch = "aarch64";
+        } else {
+            return null;
+        }
+        if (os.startsWith("windows")) {
+            return "windows-" + normalizedArch;
+        }
+        if (os.contains("mac") || os.contains("darwin")) {
+            return "macos-" + normalizedArch;
+        }
+        if (os.contains("linux")) {
+            return "linux-" + normalizedArch;
+        }
+        return null;
     }
 
     @Nullable
@@ -121,11 +156,13 @@ public final class NativeLibrary {
         }
 
         var bundled = bundledResourcePath();
-        try (InputStream in = NativeLibrary.class.getResourceAsStream(bundled)) {
-            if (in != null) {
-                var path = extractToTempFile(in);
-                System.load(path.toString());
-                return "mod jar (" + bundled + ")";
+        if (bundled != null) {
+            try (InputStream in = NativeLibrary.class.getResourceAsStream(bundled)) {
+                if (in != null) {
+                    var path = extractToTempFile(in);
+                    System.load(path.toString());
+                    return "mod jar (" + bundled + ")";
+                }
             }
         }
 

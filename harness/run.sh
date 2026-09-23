@@ -15,8 +15,9 @@ cargo build --manifest-path "$ae2/rust/Cargo.toml" --release
 
 native="$ae2/rust/target/release/libae2store_jni.so"
 # Keep the copies used for jar packaging in sync, so running the game uses the same build.
-cp -f "$native" "$ae2/build/native/libae2store_jni.so" 2>/dev/null || true
-cp -f "$native" "$ae2/build/resources/main/native/libae2store_jni.so" 2>/dev/null || true
+mkdir -p "$ae2/build/native/linux-x86_64" "$ae2/build/resources/main/native/linux-x86_64"
+cp -f "$native" "$ae2/build/native/linux-x86_64/libae2store_jni.so"
+cp -f "$native" "$ae2/build/resources/main/native/linux-x86_64/libae2store_jni.so"
 
 echo "== compiling mod sources =="
 JAVA_HOME="${JAVA_HOME:-$HOME/.gradle/jdks/eclipse_adoptium-21-amd64-linux.2}" \

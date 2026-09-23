@@ -9,6 +9,8 @@ storage queries.
 * Java bridge: `ae2-src/src/main/java/appeng/storage/nativebridge/`
 * AE2 integration: `ae2-src/src/main/java/appeng/me/storage/RustStorageIndex.java`
 * Benchmark and correctness harness: `harness/`
+* Active CI: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (the workflows under
+  `ae2-src/.github/workflows/` are retained upstream files and are not active for this repository)
 * Feature documentation: [harness/docs/native-storage-acceleration.md](harness/docs/native-storage-acceleration.md)
 * **Continuing this work: [HANDOFF.md](HANDOFF.md)** — verification state, open items, untested
   surfaces, and the environment gotchas that are not in upstream's `AGENTS.md`.
@@ -37,6 +39,8 @@ are timed against (`./gradlew :test --tests appeng.me.storage.RealCellPerformanc
 
 Ranges are across repeated runs on one machine; run-to-run spread is real and the single-cell row is
 dominated by fixed JNI cost.
+The same ranges are archived as [machine-readable JSON](harness/docs/real-cell-benchmarks.json),
+without treating shared CI runners as a stable performance baseline.
 
 What the per-tick number is made of matters, so it is measured rather than assumed. On a mutating tick
 `RustStorageIndex#profilingSummary` attributes ~11.6 µs to `sync` (a version check per mount plus the
@@ -69,6 +73,19 @@ cd ../.. && harness/run.sh
 
 Building without a Rust toolchain works and simply produces a mod that uses the Java implementation.
 
+## Native packaging
+
+Local Gradle builds bundle the current host's JNI library under `native/<os>-<arch>/`. The root CI
+workflow builds Linux x86-64, Windows x86-64, macOS ARM64 and macOS x86-64 separately, then assembles
+one mod jar with all four libraries. `NativeLibrary` selects the bundled library using both OS and
+architecture. Other platforms keep the Java fallback.
+
+To assemble from prebuilt libraries, put them in a directory with paths such as
+`linux-x86_64/libae2store_jni.so` and pass `-PnativeArtifactsDir=<directory>` to Gradle. This
+replaces the local Cargo build for that invocation. CI checks that all four artifacts exist and
+that the final jar contains them. A release event attaches the tested jars to this repository's
+GitHub release; the fork does not run the inherited AE2 publishing workflows.
+
 ## Correctness work
 
 The accelerated path is a second implementation of an aggregate that the whole mod reads, so it is
@@ -93,12 +110,12 @@ tested as one rather than trusted:
   network for the rest of the session; a filtered query sizing an accumulator to a caller-supplied key
   id; an unbounded change log behind an unmirrorable mount; and a leaked native index per network.
 
-Current status of the suites: Java 540/540 (full suite), Rust 33/33, integration harness 50/50, game
-tests 77/77.
+The pre-`12c304a` baseline was Java 540/540 (full suite), Rust 33/33, integration harness 50/50,
+and game tests 77/77. See [HANDOFF.md](HANDOFF.md) for the current verification state.
 
-**Known open item:** two game tests (`multi_storage_bus`, `regression_7288`) were intermittently
-failing roughly 1 run in 6 and have a fix in `12c304a` that is **not yet verified by a full run** — it
-was committed without re-running the suite. Re-run the game tests repeatedly before trusting them.
+Two previously intermittent game tests (`multi_storage_bus`, `regression_7288`) were fixed in
+`12c304a`. Three complete 77-test runs have since passed on this checkout. Repeated CI runs remain
+useful because three passes cannot rule out a rarer intermittent failure.
 
 ## Status
 

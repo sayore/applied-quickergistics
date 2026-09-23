@@ -43,14 +43,15 @@ import appeng.core.definitions.AEItems;
 import appeng.me.cells.BasicCellInventory;
 import appeng.me.helpers.BaseActionSource;
 import appeng.util.BootstrapMinecraft;
+import appeng.util.StackUtil;
 
 /**
  * Exercises the native storage mirror against real AE2 storage cells instead of test doubles.
  * <p>
  * The mirror's own unit test uses hand-written storages, which cannot catch anything that depends on how AE2's real
  * cells behave: {@link BasicCellInventory} keeps its contents in the cell's {@link ItemStack}, {@link DriveWatcher}
- * wraps it, and {@link AEItemKey} instances are canonical. It also cannot catch the case where an
- * {@code MEInventoryHandler} wrapper filters the reported contents and the mirror has to refuse the mount.
+ * wraps it, and distinct {@link AEItemKey} instances can describe the same resource. It also cannot catch the case
+ * where an {@code MEInventoryHandler} wrapper filters the reported contents and the mirror has to refuse the mount.
  */
 @BootstrapMinecraft
 @ExtendWith(EphemeralTestServerProvider.class)
@@ -62,8 +63,10 @@ class RustRealCellTest {
     }
 
     private final BaseActionSource src = new BaseActionSource();
+    private final MinecraftServer server;
 
     RustRealCellTest(MinecraftServer server) {
+        this.server = server;
     }
 
     private static AEItemKey key(ItemStack stack) {
@@ -160,6 +163,43 @@ class RustRealCellTest {
         var actual = new KeyCounter();
         network.getAvailableStacks(actual);
         assertSameContents(snapshot(actual), expected);
+    }
+
+    @Test
+    void persistedCellRebuildsTheMirrorAfterReload() {
+        var cellStack = AEItems.ITEM_CELL_64K.stack();
+        var inventory = BasicCellInventory.createInventory(cellStack, null);
+        assertThat(inventory).isNotNull();
+        var stone = AEItemKey.of(new ItemStack(Items.STONE));
+        assertThat(inventory.insert(stone, 320, Actionable.MODULATE, src)).isEqualTo(320);
+        assertThat(inventory.insert(AEItemKey.of(new ItemStack(Items.DIAMOND)), 7, Actionable.MODULATE, src))
+                .isEqualTo(7);
+
+        var before = new NetworkStorage();
+        before.mount(0, new DriveWatcher(inventory, () -> {
+        }));
+        var original = new KeyCounter();
+        before.getAvailableStacks(original);
+        assertThat(snapshot(original)).isNotEmpty();
+
+        // Serialize the actual cell item, then construct both the cell inventory and the network anew.
+        var saved = StackUtil.toTag(server.registryAccess(), cellStack);
+        var restoredStack = StackUtil.fromTag(server.registryAccess(), saved);
+        var restoredInventory = BasicCellInventory.createInventory(restoredStack, null);
+        assertThat(restoredInventory).isNotNull();
+        var restored = new DriveWatcher(restoredInventory, () -> {
+        });
+        var after = new NetworkStorage();
+        after.mount(0, restored);
+
+        var reloaded = new KeyCounter();
+        after.getAvailableStacks(reloaded);
+        assertSameContents(snapshot(reloaded), snapshot(original));
+
+        restoredInventory.insert(stone, 5, Actionable.MODULATE, src);
+        var updated = new KeyCounter();
+        after.getAvailableStacks(updated);
+        assertSameContents(snapshot(updated), javaAggregate(List.of(restored)));
     }
 
     @Test

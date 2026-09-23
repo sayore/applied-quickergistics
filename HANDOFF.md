@@ -17,16 +17,23 @@ cd ae2-src && JAVA_HOME=<jdk-21> ./gradlew runGametest   # in-game tests, ~30 s 
 cd harness && ./run.sh                             # native build + benchmark + 50-check harness
 ```
 
-## Verification state at `12c304a` / `b524eb2`
+## Verification state on `0be6517` plus the release-readiness changes
 
 | Suite | Result | Notes |
 | --- | --- | --- |
-| Java `:test` (full) | 540/540 | verified before `12c304a` |
-| Rust `cargo test` | 33/33 | verified before `12c304a` |
-| `harness/run.sh` | 50/50 | verified before `12c304a` |
-| `runGametest` | 77/77 | **not verified after `12c304a`** |
+| Java `:test` (full, via `build`) | 544 tests, 0 failures, 1 skipped | Includes the interner, platform and real-cell serialization tests |
+| Rust `cargo test --release --locked` | 33 passed, 1 ignored | The ignored million-mutation test was run separately and passed |
+| `harness/run.sh` | 50 checks, 0 failures | Re-run after the module and resource-path changes |
+| `runGametest` | 77/77 in each of three complete runs | Verified after `12c304a` on this machine; a rarer intermittent failure remains possible |
 
-### Open item: unverified game-test fix (`12c304a`)
+The active GitHub Actions workflow is now at the repository root. It builds four native platforms,
+assembles one jar and repeats game tests three times. The workflow and the Windows/macOS binaries
+have not yet run on GitHub; local verification covers the Linux jar and all three test runs.
+
+The Rust core now separates cell invariants (`cell.rs`), network bookkeeping (`index.rs`), posting
+lists, delta retention, queries, and tests into modules. Its public exports remain at the crate root.
+
+### Game-test fix (`12c304a`)
 
 Two game tests failed intermittently, roughly **1 run in 6**:
 
@@ -38,9 +45,9 @@ Two game tests failed intermittently, roughly **1 run in 6**:
   Fix: the idle after starting the crafting job was widened from 1 to 5 ticks. **This is the weakest
   kind of fix and may still be flaky.**
 
-`12c304a` was committed **without re-running the suite** (the verification loop was stopped on
-request). Re-run `runGametest` repeatedly — a single pass proves nothing at a 1-in-6 rate — before
-trusting either.
+`12c304a` was committed without a suite rerun at the time. This checkout has now completed three
+full 77-test runs successfully. More CI history is needed before treating the flaky behavior as
+eliminated.
 
 An earlier attempt at `regression_7288` waited for the item entity to appear and was **wrong**: the
 extra diamond only exists *after* the network is broken, so waiting for it deadlocks the test and it
@@ -54,10 +61,11 @@ These have not been exercised and are the honest gaps:
   partial-coverage fuzz uses synthetic storages, and the real-cell tests use a homogeneous drive array.
 * A live **client** reading a block entity's ME capability from the client thread. Every path found
   resolves server-side, but no test asserts it.
-* **Long-running** behaviour: the delta log under extended play, and the native `Cleaner` under real GC
-  pressure.
-* **Save/load** round-trips of a live network. Reasoned safe (the mirror holds no persisted state and
-  rebuilds on first read) but not tested.
+* **Long-running live play**: a million-mutation Rust lifecycle test now covers the bounded delta log
+  across mount/unmount cycles, and `RustStorageIndexLifecycleTest` exercises Cleaner release under GC.
+  Neither substitutes for a long-running live Minecraft server.
+* **Save/load of a live world**: `RustRealCellTest` now serializes a real cell item, reloads it into a
+  new network and checks the mirror. A full world save/restart remains untested.
 
 ## Environment and process gotchas
 

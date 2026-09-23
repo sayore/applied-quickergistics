@@ -149,7 +149,9 @@ JAVA_HOME=/path/to/jdk-21 ./gradlew build      # cargoBuild → copyNativeLibrar
 * `-PskipRust=true` (or `AE2_SKIP_RUST=true`) skips it explicitly.
 * `-PrequireRust=true` (or `AE2_REQUIRE_RUST=true`) turns a missing toolchain into a build failure, for
   CI that wants to guarantee the native build.
-* The resulting library is packaged into the mod jar as `/native/libae2store_jni.so` (or `.dll`/`.dylib`).
+* A local build packages the host library at `/native/<os>-<arch>/` (for example
+  `/native/linux-x86_64/libae2store_jni.so`). CI stages Linux, Windows and both macOS architectures
+  for one multi-platform jar with `-PnativeArtifactsDir`.
 
 ## Running and configuring
 
@@ -172,6 +174,9 @@ the native library's availability. To force the Java path:
 ```bash
 # Rust unit tests, including the invariant and priority-order regression tests
 cd ae2-src/rust && cargo test --release
+
+# Extended delta-log and mount-cycle test (one million mutations)
+cargo test --release million_mutations_replay_across_mount_cycles -- --ignored
 
 # Benchmark + end-to-end integration harness (plain JVM, no Minecraft bootstrap)
 harness/run.sh

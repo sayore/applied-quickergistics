@@ -1,0 +1,130 @@
+name: Build and test fork
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, runner: ubuntu-latest, library: libae2store_jni.so }
+          - { platform: windows-x86_64, runner: windows-latest, library: ae2store_jni.dll }
+          - { platform: macos-aarch64, runner: macos-15, library: libae2store_jni.dylib }
+          - { platform: macos-x86_64, runner: macos-15-intel, library: libae2store_jni.dylib }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test Rust core and JNI on Linux
+        if: matrix.platform == 'linux-x86_64'
+        working-directory: ae2-src/rust
+        run: cargo test --release --locked
+      - name: Build JNI library
+        working-directory: ae2-src/rust
+        run: cargo build --release --locked -p ae2store-jni
+      - name: Stage native artifact
+        shell: bash
+        run: |
+          mkdir -p "native/${{ matrix.platform }}"
+          cp "ae2-src/rust/target/release/${{ matrix.library }}" "native/${{ matrix.platform }}/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: native/
+          if-no-files-found: error
+
+  java:
+    name: Java, packaging and game tests
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: microsoft
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: ae2-src/build/native-imports
+          merge-multiple: true
+      - name: Check native matrix
+        run: |
+          test -s ae2-src/build/native-imports/linux-x86_64/libae2store_jni.so
+          test -s ae2-src/build/native-imports/windows-x86_64/ae2store_jni.dll
+          test -s ae2-src/build/native-imports/macos-aarch64/libae2store_jni.dylib
+          test -s ae2-src/build/native-imports/macos-x86_64/libae2store_jni.dylib
+      - name: Build and run Java tests
+        working-directory: ae2-src
+        run: ./gradlew build --max-workers 1 -PnativeArtifactsDir=build/native-imports
+      - name: Run integration harness
+        working-directory: harness
+        run: |
+          export PATH="$JAVA_HOME_25_X64/bin:$PATH"
+          ./run.sh
+      - name: Repeat game tests
+        working-directory: ae2-src
+        run: |
+          for attempt in 1 2 3; do
+            ./gradlew runGametest --max-workers 1 -PnativeArtifactsDir=build/native-imports
+          done
+      - name: Check every native library is in the mod jar
+        working-directory: ae2-src
+        run: |
+          jar_path=$(find build/libs -maxdepth 1 -name 'appliedenergistics2-*.jar' ! -name '*sources*' ! -name '*javadoc*' ! -name '*api*' | head -n 1)
+          test -n "$jar_path"
+          jar tf "$jar_path" > jar-contents.txt
+          for entry in \
+            native/linux-x86_64/libae2store_jni.so \
+            native/windows-x86_64/ae2store_jni.dll \
+            native/macos-aarch64/libae2store_jni.dylib \
+            native/macos-x86_64/libae2store_jni.dylib; do
+            grep -Fx "$entry" jar-contents.txt
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: java-test-results
+          path: ae2-src/build/test-results/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mod-jars
+          path: ae2-src/build/libs/
+          if-no-files-found: error
+
+  release-assets:
+    name: Attach built jars to release
+    needs: java
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mod-jars
+          path: dist
+      - name: Upload jars
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.jar --repo "${{ github.repository }}"

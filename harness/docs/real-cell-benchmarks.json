@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "source": "README.md measured results; repeated runs on one machine before 0be6517",
+  "measurement": "Real BasicCellInventory cells behind DriveWatcher mounts",
+  "unit": "microseconds per operation",
+  "notes": "Ranges are observational, not CI pass/fail thresholds. Single-cell JNI overhead and caller-owned KeyCounter copy costs remain relevant.",
+  "cases": [
+    { "cells": 29, "types": 1827, "mode": "steady", "javaUs": [70, 111], "nativeUs": [0.20, 0.22], "reportedSpeedup": [344, 533] },
+    { "cells": 14, "types": 882, "mode": "steady", "javaUs": [29, 43], "nativeUs": [0.11, 0.19], "reportedSpeedup": [194, 396] },
+    { "cells": 4, "types": 252, "mode": "steady", "javaUs": [10, 16], "nativeUs": [0.07, 0.54], "reportedSpeedup": [30, 166] },
+    { "cells": 1, "types": 63, "mode": "steady", "javaUs": [3.9, 5.9], "nativeUs": [0.46, 0.68], "reportedSpeedup": [6, 10] },
+    { "cells": 29, "types": 1827, "mode": "one-cell-mutation-per-tick", "javaUs": [84, 108], "nativeUs": [14, 15], "reportedSpeedup": [6.1, 7.4] }
+  ]
+}
