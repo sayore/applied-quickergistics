@@ -62,7 +62,7 @@ public final class RustStorageIndex {
      * Enabled by default when the native library loads. Measured against real AE2 cells
      * ({@code appeng.me.storage.RealCellPerformanceTest}), the aggregate query is faster than AE2's Java path at every
      * network size tested, including a single cell: 6-10x for one cell, 30-166x for four, 230-396x for fourteen,
-     * 382-533x for twenty-nine, and 7.4x when one cell changes every tick.
+     * 344-533x for twenty-nine, and 6.1-7.4x when one cell changes every tick.
      * <p>
      * What made it slower before is fixed: the aggregate counter is maintained instead of rebuilt per query, the
      * caller's counter is handed back instead of copied into, and the gap in the change log is found by binary search

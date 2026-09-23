@@ -63,11 +63,11 @@ measures both paths against the same cells. Launch with
 
 | Network | Java (AE2 path) | Rust mirror (incl. JNI) | Speedup |
 | --- | ---: | ---: | ---: |
-| 29 cells / 1827 types, no changes between queries | 105.6-111.1 µs | 0.20-0.22 µs | **475-533×** |
-| 14 cells / 882 types, no changes | 33.0-43.2 µs | 0.11-0.19 µs | 230-396× |
-| 4 cells / 252 types, no changes | 11.0-16.4 µs | 0.07-0.54 µs | 30-166× |
-| 1 cell / 63 types, no changes | 3.9-4.5 µs | 0.46-0.68 µs | 6-10× |
-| 29 cells, one cell mutates per tick, delta stream on (default) | 108.1 µs | 14.5 µs | **7.4×** |
+| 29 cells / 1827 types, no changes between queries | 70.5-111.1 µs | 0.20-0.22 µs | **344-533×** |
+| 14 cells / 882 types, no changes | 28.6-43.2 µs | 0.11-0.19 µs | 194-396× |
+| 4 cells / 252 types, no changes | 10.5-16.4 µs | 0.07-0.54 µs | 30-166× |
+| 1 cell / 63 types, no changes | 3.9-5.9 µs | 0.46-0.68 µs | 6-10× |
+| 29 cells, one cell mutates per tick, delta stream on (default) | 84.2-108.1 µs | 13.9-14.5 µs | **6.1-7.4×** |
 | 29 cells, one cell mutates per tick, delta stream forced off | 88.8-113.8 µs | 18.3-23.7 µs | 4.1-5.2× |
 | 29 cells, one cell mutates per tick, consumer owns its counter | 88.8-113.8 µs | 167-197 µs | 0.5× |
 
@@ -222,10 +222,10 @@ What it buys is not in `NetworkStorage#getAvailableStacks` - it is in what `Stor
 
 | Tick accounting | Java |
 | --- | ---: |
-| shared counter: query + walk every stored type | 105.4 µs |
-| delta list: query + touch the changed key | 15.1 µs |
+| shared counter: query + walk every stored type | 102.6-105.4 µs |
+| delta list: query + touch the changed key | 13.9-15.1 µs |
 
-That is what moves the end-to-end mutating tick from 4.1-5.2x to **7.4x**. `StorageService` also skips the walk entirely when the mirror's revision has not moved, so an idle tick is free rather than proportional to the network.
+That is what moves the end-to-end mutating tick from 4.1-5.2x to **6.1-7.4x**. `StorageService` also skips the walk entirely when the mirror's revision has not moved, so an idle tick is free rather than proportional to the network.
 
 The change log is dense: entries are not merged across revisions, and a cancelling change is recorded rather than elided, because a consumer that fell behind would otherwise replay an entry whose old value does not match its baseline. A property test replays it from a recorded revision over 400 rounds of pushes, deltas, extraction, insertion and reprioritisation and asserts that the reconstruction equals the real aggregate. `RustRealCellTest#deltaStreamReplaysToTheSameAggregateAsAFullRefresh` does the same against real AE2 cells.
 
