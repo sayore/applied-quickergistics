@@ -358,6 +358,145 @@ class RustStorageIndexTest {
         }
     }
 
+    /**
+     * Fuzzes the partial-coverage merge: a changing mix of mirrored and unmirrored mounts, mutated behind the network's
+     * back, mounted and unmounted while the network is queried.
+     * <p>
+     * The merge is the part of this feature that is easiest to get subtly wrong, because it keeps bookkeeping of its
+     * own (the uncovered counter and the keys that left it). A wrong answer here is not a crash, it is a terminal
+     * showing the wrong amount.
+     */
+    @Test
+    void partialCoverageMergeMatchesAReferenceUnderRandomOperations() {
+        var keys = keys(12);
+        var covered = new ArrayList<FakeStorage>();
+        var uncovered = new ArrayList<UnversionedStorage>();
+        for (var i = 0; i < 4; i++) {
+            covered.add(new FakeStorage());
+        }
+        for (var i = 0; i < 3; i++) {
+            uncovered.add(new UnversionedStorage());
+        }
+
+        var network = new NetworkStorage();
+        var mounted = new ArrayList<MEStorage>();
+        for (var i = 0; i < covered.size(); i++) {
+            network.mount(i, covered.get(i));
+            mounted.add(covered.get(i));
+        }
+        for (var i = 0; i < uncovered.size(); i++) {
+            network.mount(-i, uncovered.get(i));
+            mounted.add(uncovered.get(i));
+        }
+
+        var rnd = new java.util.Random(0xC0FFEE);
+        for (var round = 0; round < 500; round++) {
+            switch (rnd.nextInt(10)) {
+                // Move a key between a mirrored and an unmirrored mount, which is the case that can
+                // leave an amount behind in whichever side lost it.
+                case 0, 1, 2, 3 -> {
+                    var from = mounted.get(rnd.nextInt(mounted.size()));
+                    var to = mounted.get(rnd.nextInt(mounted.size()));
+                    var key = keys.get(rnd.nextInt(keys.size()));
+                    var amount = rnd.nextInt(50);
+                    set(from, key, get(from, key) - amount);
+                    set(to, key, get(to, key) + amount);
+                }
+                case 4 -> {
+                    var storage = mounted.get(rnd.nextInt(mounted.size()));
+                    var key = keys.get(rnd.nextInt(keys.size()));
+                    set(storage, key, 0);
+                }
+                // Mount and unmount change the mirror's covered set, so the aggregate has to be
+                // recomputed rather than patched. Remounting at a different priority permutes the
+                // mirror's cell array at the same time.
+                case 5, 7 -> {
+                    var all = new ArrayList<MEStorage>(covered);
+                    all.addAll(uncovered);
+                    var candidate = all.get(rnd.nextInt(all.size()));
+                    if (!mounted.contains(candidate)) {
+                        network.mount(rnd.nextInt(5), candidate);
+                        mounted.add(candidate);
+                    }
+                }
+                case 6 -> {
+                    if (mounted.size() > 1) {
+                        var victim = mounted.remove(rnd.nextInt(mounted.size()));
+                        network.unmount(victim);
+                    }
+                }
+                default -> {
+                    var storage = mounted.get(rnd.nextInt(mounted.size()));
+                    var key = keys.get(rnd.nextInt(keys.size()));
+                    set(storage, key, rnd.nextInt(60));
+                }
+            }
+
+            var actual = new KeyCounter();
+            network.getAvailableStacks(actual);
+            assertMatchesReference(network, mounted);
+
+            // The incremental path must agree with a fresh refresh too. It is patched in place, so a
+            // drift would corrupt the counter every consumer reads.
+            var revision = network.revision();
+            var replayed = new KeyCounter();
+            network.getAvailableStacks(replayed);
+            var deltas = network.deltasSince(revision);
+            if (deltas != null) {
+                for (var change : deltas.changes()) {
+                    if (change.newTotal() == 0) {
+                        replayed.remove(change.key());
+                    } else {
+                        replayed.set(change.key(), change.newTotal());
+                    }
+                }
+                var fresh = new KeyCounter();
+                network.getAvailableStacks(fresh);
+                var replayedMap = toMap(replayed);
+                var freshMap = toMap(fresh);
+                // Identity maps: Map#equals cannot be used, so compare entry-wise in both directions.
+                var diff = new StringBuilder();
+                for (var entry : freshMap.entrySet()) {
+                    var got = replayedMap.get(entry.getKey());
+                    if (got == null || !got.equals(entry.getValue())) {
+                        diff.append("\n  key ").append(entry.getKey()).append(": fresh=")
+                                .append(entry.getValue()).append(" replayed=").append(got);
+                    }
+                }
+                for (var entry : replayedMap.entrySet()) {
+                    if (!freshMap.containsKey(entry.getKey())) {
+                        diff.append("\n  key ").append(entry.getKey()).append(": only in replayed=")
+                                .append(entry.getValue());
+                    }
+                }
+                assertThat(diff.length())
+                        .as("round %d: replayed counter must match a fresh refresh%s", round, diff)
+                        .isZero();
+            }
+        }
+    }
+
+    private static long get(MEStorage storage, AEKey key) {
+        if (storage instanceof FakeStorage fake) {
+            return fake.contents.getLong(key);
+        }
+        return ((UnversionedStorage) storage).contents.getLong(key);
+    }
+
+    private static void set(MEStorage storage, AEKey key, long amount) {
+        var clamped = Math.max(0, amount);
+        if (storage instanceof FakeStorage fake) {
+            fake.set(key, clamped);
+        } else {
+            var contents = ((UnversionedStorage) storage).contents;
+            if (clamped == 0) {
+                contents.removeLong(key);
+            } else {
+                contents.put(key, clamped);
+            }
+        }
+    }
+
     @Test
     void aggregateAfterManyMutationsStaysCorrect() {
         var storageA = new FakeStorage();
