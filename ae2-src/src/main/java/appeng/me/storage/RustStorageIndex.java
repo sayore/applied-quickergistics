@@ -180,6 +180,46 @@ public final class RustStorageIndex {
         return id < 0 ? 0 : index.totalOf(id);
     }
 
+    /**
+     * Mirrors all changed mounts and returns the amounts of the given keys.
+     * <p>
+     * This is the shape of a terminal search or a "can I craft this?" check: few keys against the
+     * whole network. The native side answers it from its reverse index, so it only visits the cells
+     * that actually hold each key instead of every mount.
+     *
+     * @return the amounts in the order of {@code keys}, or {@code null} if the mirror cannot be used.
+     */
+    @Nullable
+    public long[] amountsOf(AEKey[] keys) {
+        if (!sync()) {
+            return null;
+        }
+        var ids = new int[keys.length];
+        var result = new long[keys.length];
+        for (var i = 0; i < keys.length; i++) {
+            var id = interner.idOf(keys[i]);
+            ids[i] = id;
+            if (id < 0) {
+                result[i] = 0;
+            }
+        }
+        if (ids.length == 0) {
+            return result;
+        }
+        var flat = index.available(ids);
+        // `available` only returns non-zero entries, so zero the result and fill what came back.
+        java.util.Arrays.fill(result, 0L);
+        for (var i = 0; i + 1 < flat.length; i += 2) {
+            var id = (int) flat[i];
+            for (var k = 0; k < ids.length; k++) {
+                if (ids[k] == id) {
+                    result[k] = flat[i + 1];
+                }
+            }
+        }
+        return result;
+    }
+
     @Nullable
     public AEKey keyOf(int keyId) {
         return interner.keyOf(keyId);

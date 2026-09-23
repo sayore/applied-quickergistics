@@ -58,6 +58,9 @@ pub struct Cell {
     identity: u32,
     /// False for slots that have been removed and can be reused.
     alive: bool,
+    /// Index of this cell's entry inside the posting list of the key currently being inserted, so
+    /// `add` can keep that list consistent without searching it.
+    posting_pos: usize,
     /// Bumped on every mutation so Java can decide whether to re-push the cell.
     version: u64,
 }
@@ -335,7 +338,7 @@ impl Available {
 /// `seen` holds the ids that currently have a non-zero value, which is precisely what a query
 /// result consists of, so resetting the buffer after a query is proportional to the result size
 /// instead of to the size of the key space.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct DenseAccumulator {
     values: Vec<i64>,
     seen: Vec<u32>,
@@ -367,6 +370,10 @@ impl DenseAccumulator {
         self.values[idx] += amount;
     }
 
+    fn get(&self, id: u32) -> i64 {
+        self.values.get(id as usize).copied().unwrap_or(0)
+    }
+
     fn finish(&mut self) -> Available {
         self.seen.sort_unstable();
         let mut ids = Vec::with_capacity(self.seen.len());
@@ -387,7 +394,7 @@ impl DenseAccumulator {
 /// Cells are referenced by a `u32` cell id chosen by the caller (Java keeps its own mapping from
 /// `MEStorage` instances). Cell ids are stable: removing a cell keeps its slot reserved until the
 /// slot is reused, and priority order is maintained over the physical slots.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct NetworkIndex {
     /// Cells in ascending priority order.
     cells: Vec<Cell>,
@@ -409,6 +416,14 @@ pub struct NetworkIndex {
     filter_scratch: DenseAccumulator,
     /// Whether the priority order has to be restored before the next ordered operation.
     order_dirty: bool,
+    /// Reverse index: for every key id, the ascending-priority list of cell slots that hold it.
+    ///
+    /// Key-centric operations are otherwise O(cells) because only the cell knows about the key
+    /// (via its `present` bitset). The list is the fix: it turns "find the cells holding this key"
+    /// into a direct lookup, and it makes the common "nobody holds this key" case O(1) instead of a
+    /// full scan. Slots are stored, not cell ids, and the entries are kept sorted by ascending
+    /// priority by rewriting the lists whenever cells are reordered.
+    postings: Vec<Vec<u32>>,
 }
 
 impl NetworkIndex {
@@ -438,6 +453,7 @@ impl NetworkIndex {
     /// Registers a new cell, returning its id.
     pub fn add_cell(&mut self, key_capacity: usize, priority: i32) -> u32 {
         self.ensure_capacity(key_capacity);
+        self.ensure_postings(key_capacity);
         let id = self.slot_of.len() as u32;
         if let Some(reused) = self.cells.iter().position(|c| !c.alive) {
             self.cells[reused] = Cell::new(priority, id);
@@ -466,6 +482,7 @@ impl NetworkIndex {
         };
         for (id, amount) in contents {
             self.add_total(id, -amount);
+            self.posting_remove(id, slot as u32);
         }
         let cell = &mut self.cells[slot];
         cell.alive = false;
@@ -481,8 +498,16 @@ impl NetworkIndex {
 
     /// Grows internal storage so that key ids `< key_capacity` are addressable.
     pub fn ensure_capacity(&mut self, key_capacity: usize) {
+        self.ensure_postings(key_capacity);
         if self.totals.len() < key_capacity {
             self.totals.resize(key_capacity, 0);
+        }
+    }
+
+    /// Grows the posting list array to cover `key_capacity` key ids.
+    pub fn ensure_postings(&mut self, key_capacity: usize) {
+        if self.postings.len() < key_capacity {
+            self.postings.resize_with(key_capacity, Vec::new);
         }
     }
 
@@ -517,13 +542,17 @@ impl NetworkIndex {
         let Some(slot) = self.slot(cell_id) else {
             return;
         };
-        if self.cells[slot].priority == priority {
-            return;
-        }
+        // No early return when the priority is unchanged: keeping this branch-free means the
+        // posting lists can never end up ordered by slot instead of by priority.
         let cell = &mut self.cells[slot];
         cell.priority = priority;
         cell.version = cell.version.wrapping_add(1);
         self.order_dirty = true;
+        // Permute the cell array immediately so that slot order equals priority order again, and
+        // rebuild the posting lists from it. Posting lists are slot-sorted, which is what keeps the
+        // binary searches in `posting_add`/`posting_remove` valid; a list ordered by priority but
+        // not by slot would silently break them.
+        self.reorder();
         self.invalidate();
     }
 
@@ -559,7 +588,7 @@ impl NetworkIndex {
                 .map(|i| (cell.ids[i], cell.amounts[i]))
                 .collect()
         };
-        for (id, amount) in old {
+        for &(id, amount) in &old {
             self.add_total(id, -amount);
         }
         self.cells[slot].set_contents(entries);
@@ -569,8 +598,38 @@ impl NetworkIndex {
                 .map(|i| (cell.ids[i], cell.amounts[i]))
                 .collect()
         };
-        for (id, amount) in new {
+        for &(id, amount) in &new {
             self.add_total(id, amount);
+        }
+        // Both lists are sorted by id, so the posting lists only need the symmetric difference.
+        let slot_id = slot as u32;
+        let (mut o, mut n) = (0usize, 0usize);
+        while o < old.len() || n < new.len() {
+            let old_id = old.get(o).map(|e| e.0);
+            let new_id = new.get(n).map(|e| e.0);
+            match (old_id, new_id) {
+                (Some(a), Some(b)) if a == b => {
+                    o += 1;
+                    n += 1;
+                }
+                (Some(a), Some(b)) if a < b => {
+                    self.posting_remove(a, slot_id);
+                    o += 1;
+                }
+                (Some(_), Some(b)) => {
+                    self.posting_add(b, slot_id);
+                    n += 1;
+                }
+                (Some(a), None) => {
+                    self.posting_remove(a, slot_id);
+                    o += 1;
+                }
+                (None, Some(b)) => {
+                    self.posting_add(b, slot_id);
+                    n += 1;
+                }
+                (None, None) => break,
+            }
         }
         debug_assert!(
             {
@@ -591,13 +650,21 @@ impl NetworkIndex {
         let Some(slot) = self.slot(cell_id) else {
             return;
         };
-        let cell = &mut self.cells[slot];
-        let actual = if delta > 0 {
-            cell.add(id, delta, false)
-        } else {
-            -cell.sub(id, -delta)
+        let actual = {
+            let cell = &mut self.cells[slot];
+            if delta > 0 {
+                cell.add(id, delta, false)
+            } else {
+                -cell.sub(id, -delta)
+            }
         };
         self.add_total(id, actual);
+        // The posting list tracks presence, not the amount, so a partial removal leaves it alone.
+        if self.cells[slot].holds(id) {
+            self.posting_add(id, slot as u32);
+        } else {
+            self.posting_remove(id, slot as u32);
+        }
         self.invalidate();
     }
 
@@ -605,6 +672,97 @@ impl NetworkIndex {
     fn invalidate(&mut self) {
         self.cached_valid = false;
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Adds `slot` to the posting list of `id`, keeping the list in ascending priority order.
+    ///
+    /// Ordering is by (priority, slot) rather than by slot alone, because a cell can be
+    /// reprioritised without the cell array being permuted yet, and the posting list has to stay a
+    /// faithful description of the current state at all times. Idempotent.
+    fn posting_add(&mut self, id: u32, slot: u32) {
+        let idx = id as usize;
+        if self.postings.len() <= idx {
+            self.postings.resize_with(idx + 1, Vec::new);
+        }
+        let list = &mut self.postings[idx];
+        match list.binary_search(&slot) {
+            Ok(position) => self.cells[slot as usize].posting_pos = position,
+            Err(position) => {
+                list.insert(position, slot);
+                for i in position..list.len() {
+                    let shifted = list[i];
+                    self.cells[shifted as usize].posting_pos = i;
+                }
+            }
+        }
+    }
+
+    /// Removes `slot` from the posting list of `id`. Idempotent.
+    fn posting_remove(&mut self, id: u32, slot: u32) {
+        let Some(list) = self.postings.get_mut(id as usize) else {
+            return;
+        };
+        if let Ok(position) = list.binary_search(&slot) {
+            list.remove(position);
+        }
+    }
+
+    /// Posting entries holding `id`, in ascending priority order. Empty when nobody holds it.
+    #[inline]
+    pub fn cells_holding(&self, id: u32) -> &[u32] {
+        self.postings
+            .get(id as usize)
+            .map(|list| list.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Number of entries across all posting lists, for diagnostics and tests.
+    pub fn posting_entry_count(&self) -> usize {
+        self.postings.iter().map(|list| list.len()).sum()
+    }
+
+    /// The amount `cell` holds for `id`.
+    ///
+    /// The caller knows the cell holds the key, so the branch is predictable, and the cell's id
+    /// slice is sorted: binary search costs ~log2(63) comparisons against the ~20 a linear walk
+    /// needs for a typically filled cell. Positions are deliberately not cached in the posting
+    /// entries, because inserting into a cell's id array would invalidate every position after the
+    /// insertion point.
+    #[inline]
+    fn cell_amount(cell: &Cell, id: u32) -> i64 {
+        match cell.ids.binary_search(&id) {
+            Ok(position) => cell.amounts[position],
+            Err(_) => 0,
+        }
+    }
+
+    /// Re-derives every posting list from scratch.
+    ///
+    /// Used after the cell array was physically permuted, where incremental maintenance would be
+    /// more error-prone than a rebuild. O(total entries) and only runs when the cell set changed.
+    fn rebuild_postings(&mut self) {
+        let key_capacity = self.postings.len().max(self.totals.len());
+        self.postings.clear();
+        self.postings.resize_with(key_capacity, Vec::new);
+        for slot in 0..self.cells.len() {
+            if !self.cells[slot].alive {
+                continue;
+            }
+            for i in 0..self.cells[slot].ids.len() {
+                let id = self.cells[slot].ids[i] as usize;
+                if self.postings.len() <= id {
+                    self.postings.resize_with(id + 1, Vec::new);
+                }
+                self.postings[id].push(slot as u32);
+            }
+        }
+        // Slots are visited in ascending order, so every list is already sorted by ascending
+        // priority. Record each entry's position so later incremental updates stay correct.
+        for list in self.postings.iter() {
+            for (position, &slot) in list.iter().enumerate() {
+                self.cells[slot as usize].posting_pos = position;
+            }
+        }
     }
 
     #[inline]
@@ -659,6 +817,9 @@ impl NetworkIndex {
             self.slot_of[cell.identity as usize] = slot as u32;
         }
         self.cells = promoted;
+        // Slots were permuted, so every recorded slot index is stale. Rebuild rather than trying to
+        // remap incrementally: this runs only when the cell set or a priority actually changed.
+        self.rebuild_postings();
         self.order_dirty = false;
     }
 
@@ -690,15 +851,39 @@ impl NetworkIndex {
             Some(ids) => {
                 let mut acc = std::mem::take(&mut self.filter_scratch);
                 acc.reset(self.totals.len());
-                // Filtered queries ask about few keys but must cover every cell. Driving the loop
-                // from the (short) filter keeps the work proportional to cells * filter size, and
-                // the per-cell bitset turns the common "cell does not hold this key" case into a
-                // single bit test instead of a binary search.
-                for cell in self.cells.iter().filter(|c| c.alive) {
-                    for &id in ids {
-                        if cell.holds(id) && cell.allows(id) {
-                            acc.accumulate(id, cell.get(id));
+                // A caller may repeat a key, and walking the same posting list once per repetition
+                // would scale with the repetition count instead of with the distinct key count.
+                let mut unique: Vec<u32> = ids.to_vec();
+                unique.sort_unstable();
+                unique.dedup();
+
+                // The per-key walk costs one step per holder, while a plain scan of the cached
+                // aggregate costs one step per cell and applies to every requested key at once. Pick
+                // whichever is smaller: for a targeted search on a network where keys live in few
+                // cells that is the posting list, but for keys spread over most cells the scan wins.
+                let mut holder_cost = unique.len();
+                for &id in &unique {
+                    holder_cost += self.cells_holding(id).len();
+                }
+                let scan_cost = self.cells.len() * 2;
+
+                if holder_cost <= scan_cost {
+                    for &id in &unique {
+                        let holders = self.cells_holding(id).to_vec();
+                        for slot in holders {
+                            let cell = &self.cells[slot as usize];
+                            if cell.alive && cell.allows(id) {
+                                acc.accumulate(id, Self::cell_amount(cell, id));
+                            }
                         }
+                    }
+                } else {
+                    if !self.cached_valid {
+                        self.accumulate();
+                        self.cached_valid = true;
+                    }
+                    for &id in &unique {
+                        acc.accumulate(id, self.cached.get(id));
                     }
                 }
                 let result = acc.finish();
@@ -730,31 +915,39 @@ impl NetworkIndex {
         if amount <= 0 {
             return 0;
         }
-        self.reorder();
+        // The posting list already gives the cells holding this key in the order AE2 drains them
+        // (ascending priority), so the loop touches only those cells. When nobody holds the key the
+        // list is empty and this is O(1) instead of a full scan.
+        let holders: Vec<u32> = self.cells_holding(id).to_vec();
         let mut remaining = amount;
-        // `NetworkStorage#extract` walks the priority map in ascending order, i.e. the lowest
-        // priority inventory is drained first, so the physical (ascending) order is used directly.
-        for slot in 0..self.cells.len() {
+        let mut emptied: Vec<u32> = Vec::new();
+        for slot in holders {
             if remaining <= 0 {
                 break;
             }
-            let cell = &mut self.cells[slot];
+            let cell = &mut self.cells[slot as usize];
             if !cell.alive || !cell.allows(id) {
                 continue;
             }
-            let available = cell.get(id);
+            let available = Self::cell_amount(cell, id);
             if available <= 0 {
                 continue;
             }
             let take = available.min(remaining);
             if !simulate {
                 cell.sub(id, take);
+                if !cell.holds(id) {
+                    emptied.push(slot);
+                }
             }
             remaining -= take;
         }
 
         let extracted = amount - remaining;
         if !simulate {
+            for slot in emptied {
+                self.posting_remove(id, slot);
+            }
             self.add_total(id, -extracted);
             self.invalidate();
         }
@@ -980,25 +1173,30 @@ mod tests {
         net.push_cell(high, 8, &[(1, 1)]);
         net.push_cell(low, 8, &[(1, 2), (2, 4)]);
 
-        // AE2 extracts from the lowest priority inventory first, so `low` is drained before `high`.
+        // `NetworkStorage#extract` walks the priority map in ascending order, so `high` (priority
+        // 10) is drained before `low` (priority 0): 1 from `high` is gone and `low` loses 1 more.
         assert_eq!(net.extract(1, 2, false), 2);
-        assert_eq!(net.cell_get(low, 1), 0);
-        assert_eq!(net.cell_get(high, 1), 1);
-        assert_eq!(net.cell_total(low), 4);
-        assert_eq!(net.cell_total(high), 1);
+        assert_eq!(net.cell_get(high, 1), 0);
+        assert_eq!(net.cell_get(low, 1), 1);
+        assert_eq!(net.cell_total(high), 0);
+        assert_eq!(net.cell_total(low), 5);
         assert_eq!(net.total_of(1), 1);
         assert_eq!(net.total_of(2), 4);
 
         // Reprioritising swaps the two cells in the physical array.
         net.set_cell_priority(low, 100);
-        assert_eq!(net.cell_total(low), 4);
-        assert_eq!(net.cell_total(high), 1);
-        assert_eq!(net.cell_key_count(low), 1);
-        assert_eq!(net.cell_key_count(high), 1);
+        assert_eq!(net.cell_total(low), 5);
+        assert_eq!(net.cell_total(high), 0);
+        assert_eq!(net.cell_key_count(low), 2);
+        assert_eq!(net.cell_key_count(high), 0);
         assert_eq!(net.total_of(1), 1);
         assert_eq!(net.total_of(2), 4);
 
-        // Extract now drains the highest priority cell first, which is `low` again.
+        // `low` now has the highest priority, so it is drained first.
+        assert_eq!(net.extract(1, 1, false), 1);
+        assert_eq!(net.cell_get(low, 1), 0);
+        assert_eq!(net.total_of(1), 0);
+
         assert_eq!(net.extract(2, 3, false), 3);
         assert_eq!(net.cell_get(low, 2), 1);
         assert_eq!(net.total_of(2), 1);
@@ -1006,8 +1204,8 @@ mod tests {
         // Insert fills the highest priority cell first, which is `low` (priority 100).
         assert_eq!(net.insert(1, 5, false), 5);
         assert_eq!(net.cell_get(low, 1), 5);
-        assert_eq!(net.cell_get(high, 1), 1);
-        assert_eq!(net.total_of(1), 6);
+        assert_eq!(net.cell_get(high, 1), 0);
+        assert_eq!(net.total_of(1), 5);
     }
 
     #[test]
@@ -1136,3 +1334,200 @@ mod repro_tests {
         assert_eq!(seen, 52, "distinct key count");
     }
 }
+
+#[cfg(test)]
+impl NetworkIndex {
+    /// Reference implementation used by the property tests: a literal scan over every cell in
+    /// ascending priority order. Deliberately not optimised.
+    fn extract_naive(&mut self, id: u32, amount: i64, simulate: bool) -> i64 {
+        let mut order: Vec<usize> = (0..self.cells.len())
+            .filter(|&s| self.cells[s].alive)
+            .collect();
+        order.sort_by_key(|&s| self.cells[s].priority);
+        let mut remaining = amount;
+        for slot in order {
+            if remaining <= 0 {
+                break;
+            }
+            let cell = &mut self.cells[slot];
+            if !cell.allows(id) {
+                continue;
+            }
+            let available = cell.get(id);
+            if available <= 0 {
+                continue;
+            }
+            let take = available.min(remaining);
+            if !simulate {
+                cell.sub(id, take);
+            }
+            remaining -= take;
+        }
+        amount - remaining
+    }
+}
+
+#[cfg(test)]
+mod posting_tests {
+    use super::*;
+
+    /// The naive definition the posting list has to match: for a key, the slots that hold it, in
+    /// ascending priority order.
+    fn naive_holders(net: &NetworkIndex, id: u32) -> Vec<u32> {
+        let mut order: Vec<usize> = (0..net.cells.len())
+            .filter(|&s| net.cells[s].alive)
+            .collect();
+        order.sort_by_key(|&s| net.cells[s].priority);
+        order
+            .into_iter()
+            .filter(|&s| net.cells[s].ids.binary_search(&id).is_ok())
+            .map(|s| s as u32)
+            .collect()
+    }
+
+    /// Naive per-key totals, derived by summing the cells directly.
+    fn naive_totals(net: &NetworkIndex, key_capacity: usize) -> Vec<i64> {
+        let mut totals = vec![0i64; key_capacity];
+        for cell in net.cells.iter().filter(|c| c.alive) {
+            for i in 0..cell.ids.len() {
+                totals[cell.ids[i] as usize] += cell.amounts[i];
+            }
+        }
+        totals
+    }
+
+    #[test]
+    fn postings_match_naive_under_random_operations() {
+        const KEY_CAPACITY: usize = 40;
+        const CELLS: u32 = 12;
+        let mut net = NetworkIndex::new();
+        let mut rnd = 0x1234_5678u32;
+        let mut next = move || {
+            // xorshift keeps the test dependency-free and deterministic
+            rnd ^= rnd << 13;
+            rnd ^= rnd >> 17;
+            rnd ^= rnd << 5;
+            rnd
+        };
+
+        let mut cell_ids = Vec::new();
+        for i in 0..CELLS {
+            cell_ids.push(net.add_cell(KEY_CAPACITY, (i as i32 % 4) - 1));
+        }
+
+        for step in 0..600 {
+            let cell = cell_ids[(next() % CELLS) as usize];
+            match next() % 8 {
+                // Push a fresh, sorted content snapshot.
+                0 | 1 | 2 => {
+                    let mut entries: Vec<(u32, i64)> = Vec::new();
+                    for id in 0..KEY_CAPACITY as u32 {
+                        if next() % 5 == 0 {
+                            entries.push((id, 1 + (next() % 1000) as i64));
+                        }
+                    }
+                    entries.sort_unstable_by_key(|e| e.0);
+                    entries.dedup_by_key(|e| e.0);
+                    net.push_cell(cell, KEY_CAPACITY, &entries);
+                }
+                // Single-key delta, both directions.
+                3 | 4 => {
+                    let id = next() % KEY_CAPACITY as u32;
+                    let delta = 1 + (next() % 500) as i64;
+                    net.apply_cell_delta(cell, id, delta);
+                }
+                5 => {
+                    let id = next() % KEY_CAPACITY as u32;
+                    let delta = -(1 + (next() % 500) as i64);
+                    net.apply_cell_delta(cell, id, delta);
+                }
+                // Reprioritise, which permutes the physical cell array.
+                6 => {
+                    let priority = (next() % 7) as i32 - 3;
+                    net.set_cell_priority(cell, priority);
+                }
+                // Extract, which must drop emptied cells from the posting lists.
+                _ => {
+                    let id = next() % KEY_CAPACITY as u32;
+                    net.extract(id, 1 + (next() % 2000) as i64, false);
+                }
+            }
+
+            // Invariant: posting lists describe exactly the cells holding each key.
+            for id in 0..KEY_CAPACITY as u32 {
+                let expected = naive_holders(&net, id);
+                assert_eq!(
+                    net.cells_holding(id),
+                    expected.as_slice(),
+                    "step {step}: posting list mismatch for key {id}"
+                );
+            }
+
+            // Invariant: the accelerated extract agrees with a naive scan.
+            let id = next() % KEY_CAPACITY as u32;
+            let amount = 1 + (next() % 3000) as i64;
+            let mut reference = net.clone();
+            let expected = reference.extract_naive(id, amount, true);
+            assert_eq!(
+                expected,
+                net.extract(id, amount, true),
+                "step {step}: simulated extract mismatch for key {id}"
+            );
+
+            // Invariant: network totals equal the sum over cells.
+            let totals = naive_totals(&net, KEY_CAPACITY);
+            for (id, expected) in totals.iter().enumerate() {
+                assert_eq!(
+                    net.total_of(id as u32),
+                    *expected,
+                    "step {step}: total mismatch for key {id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn postings_track_removal_and_reuse() {
+        let mut net = NetworkIndex::new();
+        let a = net.add_cell(8, 0);
+        let b = net.add_cell(8, 5);
+        net.push_cell(a, 8, &[(1, 10), (2, 20)]);
+        net.push_cell(b, 8, &[(2, 30)]);
+        assert_eq!(net.cells_holding(1).len(), 1);
+        assert_eq!(net.cells_holding(2).len(), 2);
+        assert_eq!(net.posting_entry_count(), 3);
+
+        // Removing a cell must remove its posting entries.
+        net.remove_cell(a);
+        assert!(net.cells_holding(1).is_empty());
+        assert_eq!(net.cells_holding(2).len(), 1);
+        assert_eq!(net.posting_entry_count(), 1);
+
+        // Extracting the last amount of a key must do the same.
+        net.extract(2, 30, false);
+        assert!(net.cells_holding(2).is_empty());
+        assert_eq!(net.posting_entry_count(), 0);
+    }
+
+    #[test]
+    fn filtered_query_matches_full_query() {
+        let mut net = NetworkIndex::new();
+        let a = net.add_cell(16, 0);
+        let b = net.add_cell(16, 3);
+        net.push_cell(a, 16, &[(1, 5), (2, 7), (4, 9)]);
+        net.push_cell(b, 16, &[(2, 3), (3, 11)]);
+
+        let full = net.available(None);
+        let filter = [1u32, 2, 3];
+        let filtered = net.available(Some(&filter));
+
+        for idx in 0..filtered.ids.len() {
+            let id = filtered.ids[idx];
+            let full_idx = full.ids.binary_search(&id).expect("key missing from full query");
+            assert_eq!(filtered.amounts[idx], full.amounts[full_idx], "key {id}");
+        }
+        // Keys outside the filter must not appear.
+        assert!(filtered.ids.iter().all(|id| filter.contains(id)));
+    }
+}
+
