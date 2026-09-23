@@ -102,12 +102,28 @@ class RustRealCellTest {
      * maps are identity maps, so keys are compared by reference, and the values are boxed longs whose
      * equality would depend on identity below the cache range.
      */
+    /**
+     * Entry-wise comparison.
+     * <p>
+     * {@code Map.equals} cannot be used here: both maps are identity maps, so keys are compared by
+     * reference, and the values are boxed longs whose identity below the cache range would decide the
+     * comparison. AssertJ's containment check has the same problem on the value side.
+     */
+    /**
+     * Entry-wise comparison. {@code Map.equals} cannot be used: both maps are identity maps, so keys
+     * are compared by reference, and AssertJ's containment check compares the boxed amounts, whose
+     * identity below the cache range would decide the result.
+     */
     private static void assertSameContents(Map<AEKey, Long> actual, Map<AEKey, Long> expected) {
         assertThat(actual).hasSameSizeAs(expected);
         for (var entry : expected.entrySet()) {
-            assertThat(actual)
+            var actualValue = actual.get(entry.getKey());
+            assertThat(actualValue)
                     .as("amount for %s", entry.getKey())
-                    .containsEntry(entry.getKey(), entry.getValue());
+                    .isNotNull();
+            assertThat(actualValue.longValue())
+                    .as("amount for %s", entry.getKey())
+                    .isEqualTo(entry.getValue().longValue());
         }
     }
 
