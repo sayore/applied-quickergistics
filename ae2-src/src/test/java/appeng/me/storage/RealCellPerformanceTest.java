@@ -335,6 +335,85 @@ class RealCellPerformanceTest {
     }
 
     /**
+     * The write side: what a mass extraction from a big network actually walks. This is the operation the native index
+     * does not serve today, so it is measured before anything is done about it.
+     */
+    @Test
+    void measureExtractionFanOut() {
+        var keys = collectKeys();
+        var cellCount = keys.size() / TYPES_PER_CELL;
+        var fixture = buildFixture(keys, cellCount);
+        var iterations = 2000;
+        var cells = TYPES_PER_CELL == 0 ? 0 : fixture.mirrorMounts().size();
+
+        System.out.printf("%n=== extraction fan-out, %d cells, %d types ===%n", cells,
+                cells * TYPES_PER_CELL);
+
+        // Each key lives in exactly one cell. A withdrawal of one item has to find that cell; the
+        // Java path walks the mounts in priority order until it does.
+        var source = src;
+        var javaMicros = time(i -> {
+            var key = keys.get(i % keys.size());
+            fixture.javaNetwork().extract(key, 1, Actionable.MODULATE, source);
+            fixture.javaMounts().get(0).insert(key, 1, Actionable.MODULATE, source);
+        }, iterations);
+        var mirrorMicros = time(i -> {
+            var key = keys.get(i % keys.size());
+            fixture.mirrorNetwork().extract(key, 1, Actionable.MODULATE, source);
+            fixture.mirrorMounts().get(0).insert(key, 1, Actionable.MODULATE, source);
+        }, iterations);
+        report("extract 1 item of a rotating key", "java", (long) (javaMicros * 1000 * iterations),
+                iterations);
+        report("extract 1 item of a rotating key", "mirror", (long) (mirrorMicros * 1000 * iterations),
+                iterations);
+
+        // A single key that every cell holds: the same walk, but nothing can be skipped.
+        var spread = keys.get(0);
+        for (var mount : fixture.javaMounts()) {
+            mount.insert(spread, 1000, Actionable.MODULATE, source);
+        }
+        for (var mount : fixture.mirrorMounts()) {
+            mount.insert(spread, 1000, Actionable.MODULATE, source);
+        }
+        var spreadJava = time(i -> {
+            fixture.javaNetwork().extract(spread, 1, Actionable.MODULATE, source);
+            fixture.javaMounts().get(0).insert(spread, 1, Actionable.MODULATE, source);
+        }, iterations);
+        var spreadMirror = time(i -> {
+            fixture.mirrorNetwork().extract(spread, 1, Actionable.MODULATE, source);
+            fixture.mirrorMounts().get(0).insert(spread, 1, Actionable.MODULATE, source);
+        }, iterations);
+        report("extract a key held by every cell", "java", (long) (spreadJava * 1000 * iterations),
+                iterations);
+        report("extract a key held by every cell", "mirror", (long) (spreadMirror * 1000 * iterations),
+                iterations);
+
+        // And the counter writes that surround all of this: one add per stored type.
+        var counter = new KeyCounter();
+        var counterMicros = time(i -> {
+            counter.clear();
+            for (var key : keys) {
+                counter.add(key, i);
+            }
+        }, 200);
+        report("KeyCounter.add per stored type", "java", (long) (counterMicros * 1000 * 200), 200);
+        var lookupMicros = time(i -> {
+            for (var key : keys) {
+                counter.get(key);
+            }
+        }, 200);
+        report("KeyCounter.get per stored type", "java", (long) (lookupMicros * 1000 * 200), 200);
+        var copyOut = new KeyCounter();
+        var copyMicros = time(i -> {
+            copyOut.clear();
+            for (var entry : counter) {
+                copyOut.set(entry.getKey(), entry.getLongValue());
+            }
+        }, 200);
+        report("KeyCounter copy per stored type", "java", (long) (copyMicros * 1000 * 200), 200);
+    }
+
+    /**
      * Entry-wise comparison. {@code Map.equals} cannot be used: the maps are identity maps and the values are boxed
      * longs.
      */
