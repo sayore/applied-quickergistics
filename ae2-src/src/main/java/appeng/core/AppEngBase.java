@@ -88,6 +88,7 @@ import appeng.init.internal.InitStorageCells;
 import appeng.init.internal.InitUpgrades;
 import appeng.init.worldgen.InitStructures;
 import appeng.integration.Integrations;
+import appeng.me.storage.RustStorageIndex;
 import appeng.recipes.AERecipeSerializers;
 import appeng.recipes.AERecipeTypes;
 import appeng.server.AECommand;
@@ -125,6 +126,7 @@ public abstract class AppEngBase implements AppEng {
         INSTANCE = this;
 
         AEConfig.register(container);
+        RustStorageIndex.logStartupStatus();
 
         InitGridServices.init();
         InitBlockEntityMoveStrategies.init();

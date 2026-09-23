@@ -21,6 +21,8 @@ package appeng.me.storage;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.junit.jupiter.api.Test;
 
 /**
@@ -29,6 +31,20 @@ import org.junit.jupiter.api.Test;
  * mirror becomes unreachable.
  */
 class RustStorageIndexLifecycleTest {
+    @Test
+    void explicitEnableStillRequiresAWorkingNativeBackend() {
+        assertThat(RustStorageIndex.resolveEnabled(null, () -> true)).isTrue();
+        assertThat(RustStorageIndex.resolveEnabled("true", () -> true)).isTrue();
+        assertThat(RustStorageIndex.resolveEnabled("true", () -> false)).isFalse();
+
+        var probes = new AtomicInteger();
+        assertThat(RustStorageIndex.resolveEnabled("false", () -> {
+            probes.incrementAndGet();
+            return true;
+        })).isFalse();
+        assertThat(probes.get()).as("an explicit disable must not load the native library").isZero();
+    }
+
     @Test
     void closeReleasesTheNativeIndex() {
         var mirror = RustStorageIndex.createIfAvailable();

@@ -86,6 +86,28 @@ replaces the local Cargo build for that invocation. CI checks that all four arti
 that the final jar contains them. A release event attaches the tested jars to this repository's
 GitHub release; the fork does not run the inherited AE2 publishing workflows.
 
+## Playtesting the native path
+
+Use a separate Minecraft 26.1.2 / NeoForge 26.1.2.21-beta-or-newer instance with Java 25. Install
+this fork's JAR as the only `ae2` mod, together with GuideME 26.1.10-alpha or newer. The fork uses
+AE2's existing mod ID, so a second AE2 JAR cannot be installed alongside it.
+
+Before testing storage behavior, check `logs/latest.log` for the startup line. An active bundled
+Linux build reports something like:
+
+```text
+[AE2/ae2store] native acceleration ENABLED; platform: linux-x86_64; loaded from: mod jar (...)
+```
+
+`native acceleration unavailable; ... falling back to Java` means the playtest is exercising the
+Java path. `-Dae2.native.index=false` deliberately disables the mirror and is logged as `DISABLED`.
+Even an explicit `-Dae2.native.index=true` now requires a successfully loaded and initialized native
+index; it cannot silently claim an active Rust backend when the library is missing.
+
+For a longer playtest, change drive contents and priorities, mount and unmount storage buses, run
+automation and crafting, split and reconnect networks, then save, exit and reload the world. Compare
+terminal totals with the actual inventories after each transition.
+
 ## Correctness work
 
 The accelerated path is a second implementation of an aggregate that the whole mod reads, so it is

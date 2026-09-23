@@ -21,8 +21,12 @@ package appeng.me.storage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import it.unimi.dsi.fastutil.objects.Reference2ObjectMap;
 import it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap;
@@ -56,6 +60,7 @@ import appeng.storage.nativebridge.NativeNetworkIndex;
  * never touch this class.
  */
 public final class RustStorageIndex {
+    private static final Logger LOG = LoggerFactory.getLogger(RustStorageIndex.class);
     /**
      * System property that turns the mirror off: {@code -Dae2.native.index=false}.
      * <p>
@@ -70,7 +75,11 @@ public final class RustStorageIndex {
      */
     public static final String ENABLED_PROPERTY = "ae2.native.index";
 
+    @Nullable
+    private static String initializationFailure;
     private static final boolean ENABLED = resolveEnabled();
+    private static volatile boolean operational = ENABLED;
+    private static final AtomicBoolean CREATION_FAILURE_REPORTED = new AtomicBoolean();
 
     private final NativeNetworkIndex index;
     /**
@@ -122,26 +131,68 @@ public final class RustStorageIndex {
      */
     @Nullable
     public static RustStorageIndex createIfAvailable() {
-        if (!ENABLED) {
+        if (!operational) {
             return null;
         }
         try {
             return new RustStorageIndex();
         } catch (Throwable t) {
+            operational = false;
+            if (CREATION_FAILURE_REPORTED.compareAndSet(false, true)) {
+                LOG.warn("[AE2/ae2store] native index initialization failed; falling back to Java", t);
+            }
             return null;
         }
     }
 
     public static boolean isEnabled() {
-        return ENABLED;
+        return operational;
     }
 
     private static boolean resolveEnabled() {
-        var property = System.getProperty(ENABLED_PROPERTY);
-        if (property != null) {
-            return Boolean.parseBoolean(property);
+        return resolveEnabled(System.getProperty(ENABLED_PROPERTY), RustStorageIndex::probeNative);
+    }
+
+    static boolean resolveEnabled(@Nullable String property, BooleanSupplier probe) {
+        if (property != null && !Boolean.parseBoolean(property)) {
+            return false;
         }
-        return appeng.storage.nativebridge.NativeLibrary.isAvailable();
+        return probe.getAsBoolean();
+    }
+
+    private static boolean probeNative() {
+        if (!appeng.storage.nativebridge.NativeLibrary.isAvailable()) {
+            return false;
+        }
+        try (var probe = NativeNetworkIndex.create()) {
+            return true;
+        } catch (Throwable t) {
+            initializationFailure = t.getClass().getSimpleName() + ": " + t.getMessage();
+            return false;
+        }
+    }
+
+    /** Logs the effective backend once during mod startup, before any network is constructed. */
+    public static void logStartupStatus() {
+        var property = System.getProperty(ENABLED_PROPERTY);
+        if (property != null && !Boolean.parseBoolean(property)) {
+            LOG.info("[AE2/ae2store] native acceleration DISABLED by -D{}={}; using Java", ENABLED_PROPERTY,
+                    property);
+            return;
+        }
+
+        var platform = appeng.storage.nativebridge.NativeLibrary.platformId();
+        var platformName = platform == null ? "unsupported" : platform;
+        if (operational) {
+            LOG.info("[AE2/ae2store] native acceleration ENABLED; platform: {}; loaded from: {}",
+                    platformName, appeng.storage.nativebridge.NativeLibrary.getLoadedFrom());
+        } else if (initializationFailure != null) {
+            LOG.warn("[AE2/ae2store] native acceleration unavailable; platform: {}; falling back to Java; {}",
+                    platformName, initializationFailure);
+        } else {
+            LOG.warn("[AE2/ae2store] native acceleration unavailable; platform: {}; falling back to Java; {}",
+                    platformName, appeng.storage.nativebridge.NativeLibrary.getStatus());
+        }
     }
 
     /**

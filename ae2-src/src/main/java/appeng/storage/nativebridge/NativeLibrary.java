@@ -88,6 +88,15 @@ public final class NativeLibrary {
     }
 
     /**
+     * @return the current OS and architecture identifier used for bundled native resources, or {@code null} if this
+     *         platform is not supported by the bundle.
+     */
+    @Nullable
+    public static String platformId() {
+        return platformId(System.getProperty("os.name", ""), System.getProperty("os.arch", ""));
+    }
+
+    /**
      * @return the platform-specific file name of the native library.
      */
     public static String platformLibraryName() {
