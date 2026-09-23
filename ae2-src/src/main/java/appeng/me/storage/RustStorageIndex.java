@@ -199,6 +199,71 @@ public final class RustStorageIndex {
     public final long[] diag = new long[4];
 
     /**
+     * Why a mount could not be mirrored.
+     */
+    public enum ExclusionReason {
+        /** The mount does not implement {@link VersionedStorage}, so its changes cannot be observed. */
+        NOT_VERSIONED,
+        /** The mount filters the contents it reports, which the mirror cannot reproduce yet. */
+        FILTERS_CONTENTS,
+        /** The mount refuses extraction, so it is not part of the available contents. */
+        EXTRACTION_DISABLED
+    }
+
+    /**
+     * Reports which mounts are actually mirrored and which are excluded, and why.
+     * <p>
+     * This matters more than it looks: a single excluded mount currently disables the whole mirror
+     * for that network, because the aggregate would otherwise be incomplete. Without this report that
+     * degradation is invisible - the network simply runs on the Java path and looks healthy.
+     *
+     * @return a summary for diagnostics and tests
+     */
+    public String describeCoverage() {
+        var mirrored = 0;
+        var excluded = new java.util.EnumMap<ExclusionReason, Integer>(ExclusionReason.class);
+        for (var mounted : cells.values()) {
+            var reason = exclusionReason(mounted.storage);
+            if (reason == null) {
+                mirrored++;
+            } else {
+                excluded.merge(reason, 1, Integer::sum);
+            }
+        }
+        var out = new StringBuilder();
+        out.append("mirrored=").append(mirrored);
+        out.append(", excluded=").append(cells.size() - mirrored);
+        if (!excluded.isEmpty()) {
+            out.append(" (");
+            out.append(excluded);
+            out.append(')');
+        }
+        return out.toString();
+    }
+
+    /**
+     * @return why this storage cannot be mirrored, or {@code null} when it can be.
+     */
+    @Nullable
+    private static ExclusionReason exclusionReason(MEStorage storage) {
+        if (storage instanceof MEInventoryHandler handler) {
+            if (!handler.allowsExtraction()) {
+                return ExclusionReason.EXTRACTION_DISABLED;
+            }
+            if (handler.filtersAvailableContents()) {
+                return ExclusionReason.FILTERS_CONTENTS;
+            }
+        }
+        if (storage instanceof DelegatingMEInventory delegating) {
+            return exclusionReason(delegating.getDelegate());
+        }
+        if (storage instanceof VersionedStorage) {
+            return null;
+        }
+        return ExclusionReason.NOT_VERSIONED;
+    }
+
+    /**
      * The mirror's own aggregate counter, brought up to date with the mounts.
      * <p>
      * Unlike {@link #getAvailableStacks()}, which materialises a fresh counter for a caller that wants

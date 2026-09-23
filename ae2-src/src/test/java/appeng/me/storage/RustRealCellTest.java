@@ -214,6 +214,38 @@ class RustRealCellTest {
         }
     }
 
+    /**
+     * A single mount the mirror cannot reproduce must be visible, because it currently disables the
+     * mirror for the whole network - and without a report that degradation looks like a healthy
+     * network that simply runs slower.
+     */
+    @Test
+    void coverageReportsExcludedMounts() {
+        var cell = driveCell(List.of(new ItemStack(Items.STONE, 10)));
+
+        var allMirrorable = new NetworkStorage();
+        allMirrorable.mount(0, cell);
+        var mirror = mirrorOf(allMirrorable);
+        assertThat(mirror).isNotNull();
+        // Force a sync so the mounts are classified.
+        allMirrorable.getAvailableStacks(new KeyCounter());
+        assertThat(mirror.describeCoverage()).isEqualTo("mirrored=1, excluded=0");
+
+        // A filtering handler is the storage-bus shape: the mirror cannot reproduce its filter, so it
+        // has to be reported as excluded rather than silently over-reporting.
+        var filtering = new appeng.me.storage.MEInventoryHandler(cell) {
+        };
+        filtering.setExtractFiltering(false, true);
+        var withFilter = new NetworkStorage();
+        withFilter.mount(0, filtering);
+        var filterMirror = mirrorOf(withFilter);
+        assertThat(filterMirror).isNotNull();
+        withFilter.getAvailableStacks(new KeyCounter());
+        assertThat(filterMirror.describeCoverage())
+                .contains("excluded=1")
+                .contains("FILTERS_CONTENTS");
+    }
+
     @Test
     void storageCellApiWrapsBasicInventory() {
         // Guards the assumption that a 64k item cell is a StorageCell that BasicCellInventory backs,

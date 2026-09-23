@@ -211,6 +211,54 @@ and level emitter (with a fuzzy card) ever search by durability. It now converts
 index the first time `findFuzzy` is called, so counters that are never fuzzy-searched never build a
 tree. See `appeng.api.stacks.KeyCounter`.
 
+## Coverage: what the mirror actually sees
+
+The mirror can only reflect a mount whose changes it can observe, so it requires
+`VersionedStorage`. Today only `BasicCellInventory` implements it, which means drive cells are
+covered and everything else is not:
+
+| Mount | Mirrored | Why |
+| --- | --- | --- |
+| Drive cell (`BasicCellInventory` behind `DriveWatcher`) | yes | reports a version |
+| Storage bus (`StorageBusInventory`) | no | does not report a version |
+| Filtering handler | no | the mirror cannot reproduce the filter |
+| Third-party `MEStorage` | no | does not report a version |
+
+The important part is what an excluded mount *does*: it disables the mirror for the **whole network**,
+because the aggregate would otherwise be incomplete. One storage bus in a base therefore costs all of
+the acceleration, silently — the network just runs on the Java path and looks healthy.
+`RustStorageIndex#describeCoverage()` makes that visible, and `RustRealCellTest#coverageReportsExcludedMounts`
+asserts it.
+
+### Next step: partial coverage
+
+The fix is to let the mirror answer for its own cells only, and have `NetworkStorage` add the excluded
+mounts in Java:
+
+```
+getAvailableStacks(out):
+    shared = mirror.getSharedAvailableStacks()      // its own cells, maintained
+    if shared != null:
+        out = shared (read-only, as today)
+        for each mount the mirror does not cover:   // typically none
+            mount.getAvailableStacks(out)           // Java, only for those
+```
+
+That keeps the aggregate exact while making the cost proportional to the uncovered mounts instead of
+all-or-nothing, so one storage bus no longer throws away the whole win. It needs
+`RustStorageIndex` to expose its covered set, and `NetworkStorage` to track the mounts it did not
+hand to the mirror.
+
+### Next step: storage buses
+
+Covering a storage bus is a separate, smaller problem: `StorageBusPart` already polls its external
+inventory through `ExternalInventoryCache`, so the change detection exists. The bus needs to implement
+`VersionedStorage` and return a counter that moves when that cache reports a change, and the mirror
+needs the bus's `IPartitionList` pushed down as a whitelist (the per-cell whitelist bitset already
+exists in the core; blacklists need a second bitset and a mode). Before enabling this, verify with a
+test that `PrecisePriorityList.getItems()` returns the canonical key instances the identity-based
+interner needs - if it returns copies, their ids will not match the aggregate.
+
 ## Limitations and next steps
 
 * Only the aggregate read path is accelerated. Extract/insert fan-out is untouched.
