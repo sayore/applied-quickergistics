@@ -232,6 +232,13 @@ asserts it.
 
 ### Next step: partial coverage
 
+**Status: attempted and reverted.** The approach below was implemented, and it broke an existing
+correctness test (`RustRealCellTest#mirrorMatchesRealCells`) in a way that could not be diagnosed
+before the work had to stop, so it was reverted rather than left in the tree. The design is recorded
+because it is still the right shape, together with the one concrete hint the failed attempt produced:
+the breaking case involved a mount that the report says is covered, so the likely culprit is the
+conditional update of the maintained counter rather than the Java-side summation.
+
 The fix is to let the mirror answer for its own cells only, and have `NetworkStorage` add the excluded
 mounts in Java:
 
