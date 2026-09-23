@@ -1131,7 +1131,8 @@ impl NetworkIndex {
         }
         self.reorder();
         let mut remaining = amount;
-        let mut added_to: Vec<(u32, i64)> = Vec::new();
+        // (cell identity, amount added, slot) so the totals and the posting list can both be updated.
+        let mut added_to: Vec<(u32, i64, u32)> = Vec::new();
         for slot in (0..self.cells.len()).rev() {
             if remaining <= 0 {
                 break;
@@ -1146,7 +1147,7 @@ impl NetworkIndex {
                 let identity = cell.identity;
                 let added = cell.add(id, remaining, true);
                 if added > 0 {
-                    added_to.push((identity, added));
+                    added_to.push((identity, added, slot as u32));
                 }
                 added
             };
@@ -1155,8 +1156,12 @@ impl NetworkIndex {
 
         let inserted = amount - remaining;
         if !simulate {
-            for (cell_id, added) in added_to {
+            for (cell_id, added, slot) in added_to {
                 self.add_total_for_cell(id, added, cell_id);
+                // A cell that did not hold the key before has to enter its posting list, or the key
+                // becomes invisible to `extract` and to the filtered query: both find their cells
+                // through the postings rather than by scanning.
+                self.posting_add(id, slot);
             }
             self.invalidate();
         }
@@ -1213,6 +1218,152 @@ mod tests {
         assert_eq!(net.total_of(1), 4);
         assert_eq!(net.total_of(2), 6);
         assert_eq!(net.total_amount(), 10);
+    }
+
+    /// Differential test of the write paths against a naive model of the same rules.
+    ///
+    /// The mirror does not serve extract/insert today, but they are the obvious next step and they
+    /// carry AE2's priority and per-key-cap rules, which are easy to get subtly wrong. The model
+    /// mirrors the documented semantics directly: drain in ascending (priority, insertion) order,
+    /// fill in descending order, honour whitelists and per-key caps.
+    #[test]
+    fn extract_and_insert_match_a_naive_model_under_random_operations() {
+        const KEY_CAPACITY: usize = 24;
+        const CELLS: usize = 6;
+        const KEYS: u32 = 8;
+
+        let mut net = idx();
+        let mut rnd = 0x5EED_1234u32;
+        let mut next = move || {
+            rnd ^= rnd << 13;
+            rnd ^= rnd >> 17;
+            rnd ^= rnd << 5;
+            rnd
+        };
+
+        // (cell id, priority, insertion index, contents, per-key cap)
+        #[derive(Clone)]
+        struct Model {
+            priority: i32,
+            order: usize,
+            amounts: Vec<i64>,
+            cap: i64,
+        }
+        let mut model: Vec<Model> = Vec::new();
+        let mut cell_ids: Vec<u32> = Vec::new();
+
+        // An explicit per-key cap on both sides: the native default is a cell property, and a model
+        // that guesses it differently would compare two different systems.
+        const CAP: i64 = 256;
+        for i in 0..CELLS {
+            let priority = (i as i32 % 3) - 1;
+            let cell = net.add_cell(KEY_CAPACITY, priority);
+            net.set_cell_max_per_key(cell, CAP);
+            cell_ids.push(cell);
+            model.push(Model { priority, order: i, amounts: vec![0; KEYS as usize], cap: CAP });
+        }
+
+        // Naive extract: ascending priority, then insertion order.
+        let naive_extract = |model: &mut Vec<Model>, id: u32, amount: i64| -> i64 {
+            let mut order: Vec<usize> = (0..model.len()).collect();
+            order.sort_by_key(|&i| (model[i].priority, model[i].order));
+            let mut remaining = amount;
+            for i in order {
+                if remaining <= 0 {
+                    break;
+                }
+                let have = model[i].amounts[id as usize];
+                let take = have.min(remaining).max(0);
+                model[i].amounts[id as usize] -= take;
+                remaining -= take;
+            }
+            amount - remaining
+        };
+
+        // Naive insert: descending priority, then insertion order.
+        let naive_insert = |model: &mut Vec<Model>, id: u32, amount: i64| -> i64 {
+            let mut order: Vec<usize> = (0..model.len()).collect();
+            order.sort_by_key(|&i| (-model[i].priority, model[i].order));
+            let mut remaining = amount;
+            for i in order {
+                if remaining <= 0 {
+                    break;
+                }
+                let have = model[i].amounts[id as usize];
+                let room = model[i].cap.saturating_sub(have).max(0);
+                let put = room.min(remaining);
+                model[i].amounts[id as usize] += put;
+                remaining -= put;
+            }
+            amount - remaining
+        };
+
+        for step in 0..600 {
+            let id = next() % KEYS;
+            let amount = 1 + (next() % 500) as i64;
+            match next() % 8 {
+                0 | 1 | 2 => {
+                    let expected = naive_insert(&mut model, id, amount);
+                    assert_eq!(
+                        net.insert(id, amount, false),
+                        expected,
+                        "step {step}: insert {amount} of key {id}"
+                    );
+                }
+                3 | 4 | 5 => {
+                    let expected = naive_extract(&mut model, id, amount);
+                    assert_eq!(
+                        net.extract(id, amount, false),
+                        expected,
+                        "step {step}: extract {amount} of key {id}"
+                    );
+                }
+                6 => {
+                    // Simulate must not change anything, on either side.
+                    let expected_insert = naive_insert(&mut model.clone(), id, amount);
+                    assert_eq!(
+                        net.insert(id, amount, true),
+                        expected_insert,
+                        "step {step}: simulated insert"
+                    );
+                    let expected_extract = naive_extract(&mut model.clone(), id, amount);
+                    assert_eq!(
+                        net.extract(id, amount, true),
+                        expected_extract,
+                        "step {step}: simulated extract"
+                    );
+                }
+                _ => {
+                    // Reprioritise a cell, which permutes the native cell array.
+                    let which = next() as usize % CELLS;
+                    let priority = (next() % 5) as i32 - 2;
+                    model[which].priority = priority;
+                    net.set_cell_priority(cell_ids[which], priority);
+                }
+            }
+
+            // Independent invariants after every step.
+            for id in 0..KEYS {
+                let modelled: i64 = model.iter().map(|m| m.amounts[id as usize]).sum();
+                assert_eq!(
+                    net.total_of(id),
+                    modelled,
+                    "step {step}: total mismatch for key {id}"
+                );
+            }
+            assert_eq!(
+                net.total_amount(),
+                model.iter().flat_map(|m| m.amounts.iter()).sum::<i64>(),
+                "step {step}: network total mismatch"
+            );
+            for i in 0..CELLS {
+                let slot = net.slot(cell_ids[i]).expect("cell must stay alive");
+                assert_eq!(
+                    net.cells[slot].priority, model[i].priority,
+                    "step {step}: priority of cell {i}"
+                );
+            }
+        }
     }
 
     #[test]
