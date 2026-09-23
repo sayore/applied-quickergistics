@@ -357,9 +357,24 @@ report a version that moves when that cache reports a change. Two caveats before
   and the delta application. They exist because the first honest-looking number here (0.4x) was an
   artifact twice over, and guessing at the cause wasted more time than measuring it.
 
+### Write-path follow-up after the 26.1.2 prerelease
+
+The live insertion-heavy playtest spent little sampled Java time in storage refresh. The next
+change therefore stays in `BasicCellInventory`, which owns cell contents: a drive-backed cell now
+updates its cached item count by the known insert/extract delta instead of summing every stored
+type after each mutation. A cell that cannot accept the item also rejects it before constructing an
+`ItemStack` and querying the cell-handler registry to check for nested storage cells. Successful
+inserts still perform that safety check. A cell without a save provider must still serialize its
+contents on every mutation, so this change primarily targets mounted drives and ME chests.
+
+`BasicCellInventoryMutationTest` covers counts, simulation, extraction, persistence and nested-cell
+rejection. No end-to-end MSPT improvement is claimed until the change is measured in the same
+insertion workload as the prerelease.
+
 ## Limitations and next steps
 
-* Only the aggregate read path is accelerated. Extract/insert fan-out is untouched.
+* Only the aggregate read path is accelerated by Rust. Extract/insert fan-out is untouched; the
+  Java cell mutation bookkeeping above is a separate optimization.
 * Fuzzy/partition filtering is handled by refusing to mirror filtered `MEInventoryHandler` mounts
   rather than by replicating the filter natively. Replicating it would let `Storage Bus`, `Export Bus`
   and level-emitter networks benefit too.

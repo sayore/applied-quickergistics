@@ -225,14 +225,12 @@ public class BasicCellInventory implements StorageCell, VersionedStorage {
         return this.storageVersion;
     }
 
-    protected void saveChanges() {
+    private void saveChanges(long itemCountDelta) {
         this.storageVersion++;
-        // recalculate values
+        // The caller knows the exact change. Recounting every stored type here makes
+        // each insert/extract linear in the number of types in this cell.
         this.storedItems = (short) this.storedAmounts.size();
-        this.storedItemCount = 0;
-        for (var storedAmount : this.storedAmounts.values()) {
-            this.storedItemCount += storedAmount;
-        }
+        this.storedItemCount += itemCountDelta;
 
         this.isPersisted = false;
         if (this.container != null) {
@@ -247,6 +245,13 @@ public class BasicCellInventory implements StorageCell, VersionedStorage {
         var stacks = getStoredStacks();
         for (var stack : stacks) {
             storedAmounts.put(stack.what(), stack.amount());
+        }
+        // Normalize the cached counts once after loading. A malformed cell may
+        // contain duplicate keys, in which case the map keeps only the last one.
+        this.storedItems = storedAmounts.size();
+        this.storedItemCount = 0;
+        for (var amount : storedAmounts.values()) {
+            this.storedItemCount += amount;
         }
     }
 
@@ -373,16 +378,6 @@ public class BasicCellInventory implements StorageCell, VersionedStorage {
 
     // Inner insert for items that pass the filter.
     private long innerInsert(AEKey what, long amount, Actionable mode) {
-        // Prevent non-empty storage cells from being recursively stored inside this cell
-        if (what instanceof AEItemKey itemKey) {
-            var stack = itemKey.toStack();
-
-            var cellInv = StorageCells.getCellInventory(stack, null);
-            if (cellInv != null && !cellInv.canFitInsideCell()) {
-                return 0;
-            }
-        }
-
         var currentAmount = this.getCellItems().getLong(what);
         long remainingItemCount = this.getRemainingItemCount();
 
@@ -406,9 +401,22 @@ public class BasicCellInventory implements StorageCell, VersionedStorage {
             amount = remainingItemCount;
         }
 
+        if (amount <= 0) {
+            return 0;
+        }
+
+        // A full cell rejects the item before constructing its stack and querying
+        // every registered cell handler. Successful inserts still enforce nesting.
+        if (what instanceof AEItemKey itemKey) {
+            var cellInv = StorageCells.getCellInventory(itemKey.toStack(), null);
+            if (cellInv != null && !cellInv.canFitInsideCell()) {
+                return 0;
+            }
+        }
+
         if (mode == Actionable.MODULATE) {
             getCellItems().put(what, currentAmount + amount);
-            this.saveChanges();
+            this.saveChanges(amount);
         }
 
         return amount;
@@ -421,14 +429,14 @@ public class BasicCellInventory implements StorageCell, VersionedStorage {
             if (amount >= currentAmount) {
                 if (mode == Actionable.MODULATE) {
                     getCellItems().remove(what, currentAmount);
-                    this.saveChanges();
+                    this.saveChanges(-currentAmount);
                 }
 
                 return currentAmount;
             } else {
                 if (mode == Actionable.MODULATE) {
                     getCellItems().put(what, currentAmount - amount);
-                    this.saveChanges();
+                    this.saveChanges(-amount);
                 }
 
                 return amount;
