@@ -395,7 +395,11 @@ public final class AutoCraftingTestPlots {
             var craftingJob = new TestCraftingJob(helper, BlockPos.ZERO, AEItemKey.of(Items.STICK), 1);
             helper.startSequence()
                     .thenWaitUntil(craftingJob::tickUntilStarted)
-                    .thenIdle(1) // give time to push out job
+                    // The extra diamond only exists once the network is broken below, so the assertion
+                    // cannot be the wait condition here - waiting for it deadlocks the test. What the
+                    // job needs is time to push its output into the network, which varies with tick
+                    // ordering, so allow more than the one tick that used to be enough usually.
+                    .thenIdle(5) // give time to push out job
                     .thenExecute(() -> {
                         // break cable
                         helper.destroyBlock(new BlockPos(0, 0, -2));

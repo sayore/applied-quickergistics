@@ -164,9 +164,11 @@ public final class SubnetPlots {
                         mainInv.insert(AEItemKey.of(Items.BLUE_CONCRETE), 64, Actionable.MODULATE,
                                 IActionSource.empty());
                     })
-                    .thenIdle(1)
-                    .thenExecute(() -> {
-                        // Ensure both red and blue concrete are visible on the sub-network
+                    // The storage buses poll their target inventories, so the contents become visible on
+                    // their own schedule. A fixed idle of one tick used to be enough usually; when it was
+                    // not, this failed with an empty network for a reason unrelated to the buses' logic.
+                    // The assertions are retryable, so they can be the wait condition.
+                    .thenWaitUntil(() -> {
                         helper.assertNetworkContains(subnetOrigin, Items.RED_CONCRETE);
                         helper.assertNetworkContains(subnetOrigin, Items.BLUE_CONCRETE);
                     })
