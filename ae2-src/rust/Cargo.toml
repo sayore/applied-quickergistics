@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["ae2store", "ae2store-jni"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later"
+repository = "https://github.com/AppliedEnergistics/Applied-Energistics-2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"

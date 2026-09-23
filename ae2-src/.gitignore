@@ -25,6 +25,9 @@
 # include sourcecode
 !docs/
 !src/
+# native acceleration sources
+!rust/
+/rust/target
 src/generated/resources/.cache
 out
 build

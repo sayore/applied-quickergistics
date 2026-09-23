@@ -1,0 +1,15 @@
+[package]
+name = "ae2store-jni"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JNI bindings for the ae2store network storage index"
+
+[lib]
+name = "ae2store_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+ae2store = { path = "../ae2store" }
+jni = "0.21"
+

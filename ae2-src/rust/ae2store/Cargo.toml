@@ -1,0 +1,14 @@
+[package]
+name = "ae2store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dense network-wide item storage index for Applied Energistics 2"
+
+[lib]
+name = "ae2store"
+crate-type = ["rlib"]
+
+[dependencies]
+
+[dev-dependencies]
