@@ -1,0 +1,181 @@
+/*
+ * This file is part of Applied Energistics 2.
+ * Copyright (c) 2025, TeamAppliedEnergistics, All rights reserved.
+ *
+ * Applied Energistics 2 is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Applied Energistics 2 is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with Applied Energistics 2.  If not, see <http://www.gnu.org/licenses/lgpl>.
+ */
+
+package appeng.me.storage;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.neoforged.testframework.junit.EphemeralTestServerProvider;
+
+import appeng.api.config.Actionable;
+import appeng.api.stacks.AEItemKey;
+import appeng.api.stacks.AEKey;
+import appeng.api.stacks.KeyCounter;
+import appeng.api.storage.MEStorage;
+import appeng.api.storage.StorageCells;
+import appeng.core.definitions.AEItems;
+import appeng.me.cells.BasicCellInventory;
+import appeng.me.helpers.BaseActionSource;
+import appeng.util.BootstrapMinecraft;
+
+/**
+ * Exercises the native storage mirror against real AE2 storage cells instead of test doubles.
+ * <p>
+ * The mirror's own unit test uses hand-written storages, which cannot catch anything that depends on
+ * how AE2's real cells behave: {@link BasicCellInventory} keeps its contents in the cell's
+ * {@link ItemStack}, {@link DriveWatcher} wraps it, and {@link AEItemKey} instances are canonical. It
+ * also cannot catch the case where an {@code MEInventoryHandler} wrapper filters the reported
+ * contents and the mirror has to refuse the mount.
+ */
+@BootstrapMinecraft
+@ExtendWith(EphemeralTestServerProvider.class)
+class RustRealCellTest {
+    private final BaseActionSource src = new BaseActionSource();
+
+    RustRealCellTest(MinecraftServer server) {
+    }
+
+    private static AEItemKey key(ItemStack stack) {
+        return AEItemKey.of(stack);
+    }
+
+    /** Builds a drive cell holding {@code stacks}, wrapped the way a drive mounts it. */
+    private static DriveWatcher driveCell(List<ItemStack> stacks) {
+        var cell = AEItems.ITEM_CELL_64K.stack();
+        var inventory = BasicCellInventory.createInventory(cell, null);
+        assertThat(inventory).isNotNull();
+        var source = new BaseActionSource();
+        for (var stack : stacks) {
+            var inserted = inventory.insert(AEItemKey.of(stack), stack.getCount(), Actionable.MODULATE,
+                    source);
+            assertThat(inserted).as("inserting %s", stack).isEqualTo(stack.getCount());
+        }
+        return new DriveWatcher(inventory, () -> {
+        });
+    }
+
+    private static Map<AEKey, Long> snapshot(KeyCounter counter) {
+        var map = new IdentityHashMap<AEKey, Long>();
+        for (var entry : counter) {
+            map.put(entry.getKey(), entry.getLongValue());
+        }
+        return map;
+    }
+
+    /**
+     * Entry-wise comparison of two identity-keyed maps.
+     * <p>
+     * {@code Map.equals} compares values with {@code equals}, which is wrong here twice over: the
+     * maps are identity maps, so keys are compared by reference, and the values are boxed longs whose
+     * equality would depend on identity below the cache range.
+     */
+    private static void assertSameContents(Map<AEKey, Long> actual, Map<AEKey, Long> expected) {
+        assertThat(actual).hasSameSizeAs(expected);
+        for (var entry : expected.entrySet()) {
+            assertThat(actual)
+                    .as("amount for %s", entry.getKey())
+                    .containsEntry(entry.getKey(), entry.getValue());
+        }
+    }
+
+    /** The aggregate the Java path produces for the given mounts. */
+    private static Map<AEKey, Long> javaAggregate(List<MEStorage> mounts) {
+        var counter = new KeyCounter();
+        for (var mount : mounts) {
+            mount.getAvailableStacks(counter);
+        }
+        return snapshot(counter);
+    }
+
+    @Test
+    void mirrorMatchesRealCells() {
+        var stacks = new ArrayList<ItemStack>();
+        stacks.add(new ItemStack(Items.STONE, 1000));
+        stacks.add(new ItemStack(Items.DIRT, 500));
+        stacks.add(new ItemStack(Items.IRON_INGOT, 250));
+        // A stack with a data component, so the key carries a secondary component.
+        var named = new ItemStack(Items.DIAMOND_SWORD, 1);
+        named.set(DataComponents.CUSTOM_NAME, net.minecraft.network.chat.Component.literal("Excalibur"));
+        stacks.add(named);
+
+        var first = driveCell(stacks);
+        var secondStacks = new ArrayList<ItemStack>();
+        secondStacks.add(new ItemStack(Items.STONE, 7));
+        secondStacks.add(new ItemStack(Items.GOLD_INGOT, 42));
+        var second = driveCell(secondStacks);
+
+        var network = new NetworkStorage();
+        network.mount(0, first);
+        network.mount(5, second);
+
+        var expected = javaAggregate(List.of(first, second));
+        assertThat(expected).isNotEmpty();
+
+        var actual = new KeyCounter();
+        network.getAvailableStacks(actual);
+        assertSameContents(snapshot(actual), expected);
+    }
+
+    @Test
+    void mirrorTracksRealCellMutations() {
+        var stacks = new ArrayList<ItemStack>();
+        stacks.add(new ItemStack(Items.STONE, 100));
+        var cell = driveCell(stacks);
+
+        var network = new NetworkStorage();
+        network.mount(0, cell);
+        var expected = javaAggregate(List.of(cell));
+
+        // Pull the real inventory back out of the wrapper and mutate it behind the network's back,
+        // which is exactly what an IO port or a crafting CPU does.
+        var inventory = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) cell.getDelegate());
+        var stone = AEItemKey.of(new ItemStack(Items.STONE));
+        inventory.insert(stone, 900, Actionable.MODULATE, src);
+        inventory.insert(AEItemKey.of(new ItemStack(Items.EMERALD)), 5, Actionable.MODULATE, src);
+        inventory.extract(stone, 50, Actionable.MODULATE, src);
+
+        expected = javaAggregate(List.of(cell));
+        var actual = new KeyCounter();
+        network.getAvailableStacks(actual);
+        assertSameContents(snapshot(actual), expected);
+
+        // Also check that extracting through the network reports the same amount the cell does.
+        var extracted = network.extract(stone, 10_000, Actionable.SIMULATE, src);
+        assertThat(extracted).isEqualTo(950);
+    }
+
+    @Test
+    void storageCellApiWrapsBasicInventory() {
+        // Guards the assumption that a 64k item cell is a StorageCell that BasicCellInventory backs,
+        // so this test keeps testing real cells if AE2 changes the wiring.
+        var cell = AEItems.ITEM_CELL_64K.stack();
+        assertThat(StorageCells.getCellInventory(cell, null)).isInstanceOf(BasicCellInventory.class);
+    }
+}
