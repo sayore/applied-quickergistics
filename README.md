@@ -10,6 +10,8 @@ storage queries.
 * AE2 integration: `ae2-src/src/main/java/appeng/me/storage/RustStorageIndex.java`
 * Benchmark and correctness harness: `harness/`
 * Feature documentation: [harness/docs/native-storage-acceleration.md](harness/docs/native-storage-acceleration.md)
+* **Continuing this work: [HANDOFF.md](HANDOFF.md)** — verification state, open items, untested
+  surfaces, and the environment gotchas that are not in upstream's `AGENTS.md`.
 
 ## What it does
 
