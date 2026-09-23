@@ -1,0 +1,6 @@
+{
+  "parent": "ae2:item/sky_stone_chest",
+  "textures": {
+    "0": "ae2:block/skyblockchest"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#c:ingots/iron",
+    "b": "ae2:logic_processor",
+    "c": "ae2:engineering_processor",
+    "d": "ae2:energy_cell",
+    "e": "#ae2:smart_dense_cable"
+  },
+  "pattern": [
+    "aba",
+    "cde",
+    "aba"
+  ],
+  "result": {
+    "id": "ae2:quantum_ring"
+  }
+}

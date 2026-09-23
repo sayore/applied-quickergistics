@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#c:glass_blocks/cheap",
+    "b": "ae2:fluix_glass_cable",
+    "c": "ae2:io_port",
+    "d": "#c:ingots/iron",
+    "e": "ae2:engineering_processor"
+  },
+  "pattern": [
+    "aaa",
+    "bcb",
+    "ded"
+  ],
+  "result": {
+    "id": "ae2:spatial_io_port"
+  }
+}

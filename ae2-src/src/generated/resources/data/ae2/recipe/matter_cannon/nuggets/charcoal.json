@@ -1,0 +1,14 @@
+{
+  "neoforge:conditions": [
+    {
+      "type": "neoforge:not",
+      "value": {
+        "type": "neoforge:tag_empty",
+        "tag": "c:nuggets/charcoal"
+      }
+    }
+  ],
+  "type": "ae2:matter_cannon",
+  "ammo": "#c:nuggets/charcoal",
+  "weight": 12.0107
+}

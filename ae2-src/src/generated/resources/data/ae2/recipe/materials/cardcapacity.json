@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "#ae2:all_certus_quartz",
+    "ae2:basic_card"
+  ],
+  "result": {
+    "id": "ae2:capacity_card"
+  }
+}

@@ -1,0 +1,160 @@
+/*
+ * This file is part of Applied Energistics 2.
+ * Copyright (c) 2013 - 2014, AlgorithmX2, All rights reserved.
+ *
+ * Applied Energistics 2 is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Applied Energistics 2 is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with Applied Energistics 2.  If not, see <http://www.gnu.org/licenses/lgpl>.
+ */
+
+package appeng.parts.misc;
+
+import java.util.List;
+
+import org.jetbrains.annotations.Nullable;
+
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.storage.ValueInput;
+import net.minecraft.world.level.storage.ValueOutput;
+import net.minecraft.world.phys.Vec3;
+
+import appeng.api.inventories.InternalInventory;
+import appeng.api.networking.GridHelper;
+import appeng.api.networking.IGridNode;
+import appeng.api.networking.IGridNodeListener;
+import appeng.api.networking.IManagedGridNode;
+import appeng.api.parts.IPartCollisionHelper;
+import appeng.api.parts.IPartItem;
+import appeng.api.util.AECableType;
+import appeng.api.util.IConfigManager;
+import appeng.helpers.InterfaceLogic;
+import appeng.helpers.InterfaceLogicHost;
+import appeng.menu.locator.MenuLocators;
+import appeng.parts.AEBasePart;
+
+public class InterfacePart extends AEBasePart implements InterfaceLogicHost {
+
+    private static final IGridNodeListener<InterfacePart> NODE_LISTENER = new NodeListener<>() {
+        @Override
+        public void onGridChanged(InterfacePart nodeOwner, IGridNode node) {
+            super.onGridChanged(nodeOwner, node);
+            nodeOwner.getInterfaceLogic().gridChanged();
+        }
+    };
+
+    private final InterfaceLogic logic = createLogic();
+
+    public InterfacePart(IPartItem<?> partItem) {
+        super(partItem);
+    }
+
+    protected InterfaceLogic createLogic() {
+        return new InterfaceLogic(getMainNode(), this, getPartItem().asItem());
+    }
+
+    @Override
+    public void saveChanges() {
+        getHost().markForSave();
+    }
+
+    @Override
+    protected IManagedGridNode createMainNode() {
+        return GridHelper.createManagedNode(this, NODE_LISTENER);
+    }
+
+    @Override
+    protected void onMainNodeStateChanged(IGridNodeListener.State reason) {
+        super.onMainNodeStateChanged(reason);
+        if (getMainNode().hasGridBooted()) {
+            this.logic.notifyNeighbors();
+        }
+    }
+
+    @Override
+    public void getBoxes(IPartCollisionHelper bch) {
+        bch.addBox(2, 2, 14, 14, 14, 16);
+        bch.addBox(5, 5, 12, 11, 11, 14);
+    }
+
+    @Override
+    public void readFromNBT(ValueInput input) {
+        super.readFromNBT(input);
+        this.logic.readFromNBT(input);
+    }
+
+    @Override
+    public void writeToNBT(ValueOutput data) {
+        super.writeToNBT(data);
+        this.logic.writeToNBT(data);
+    }
+
+    @Override
+    public void addAdditionalDrops(List<ItemStack> drops, boolean wrenched) {
+        super.addAdditionalDrops(drops, wrenched);
+        this.logic.addDrops(drops);
+    }
+
+    @Override
+    public void clearContent() {
+        super.clearContent();
+        this.logic.clearContent();
+    }
+
+    @Override
+    public float getCableConnectionLength(AECableType cable) {
+        return 4;
+    }
+
+    @Override
+    public IConfigManager getConfigManager() {
+        return this.logic.getConfigManager();
+    }
+
+    @Override
+    public boolean onUseWithoutItem(Player p, Vec3 pos) {
+        if (!p.level().isClientSide()) {
+            openMenu(p, MenuLocators.forPart(this));
+        }
+        return true;
+    }
+
+    @Override
+    public InterfaceLogic getInterfaceLogic() {
+        return this.logic;
+    }
+
+    @Override
+    public int getPriority() {
+        return this.logic.getPriority();
+    }
+
+    @Override
+    public void setPriority(int newValue) {
+        this.logic.setPriority(newValue);
+    }
+
+    @Nullable
+    @Override
+    public InternalInventory getSubInventory(Identifier id) {
+        if (id.equals(UPGRADES)) {
+            return logic.getUpgrades();
+        }
+        return super.getSubInventory(id);
+    }
+
+    @Override
+    public ItemStack getMainMenuIcon() {
+        return new ItemStack(getPartItem());
+    }
+}

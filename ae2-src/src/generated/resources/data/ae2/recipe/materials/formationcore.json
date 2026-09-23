@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#ae2:all_certus_quartz",
+    "b": "#c:dusts/fluix",
+    "c": "ae2:logic_processor"
+  },
+  "pattern": [
+    "abc"
+  ],
+  "result": {
+    "count": 2,
+    "id": "ae2:formation_core"
+  }
+}

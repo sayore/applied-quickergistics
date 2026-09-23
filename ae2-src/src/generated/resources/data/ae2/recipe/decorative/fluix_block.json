@@ -1,0 +1,14 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "ae2:fluix_crystal"
+  },
+  "pattern": [
+    "aa",
+    "aa"
+  ],
+  "result": {
+    "id": "ae2:fluix_block"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#c:ingots/iron",
+    "b": "ae2:engineering_processor",
+    "c": "#ae2:all_fluix"
+  },
+  "pattern": [
+    " a ",
+    "aba",
+    "ccc"
+  ],
+  "result": {
+    "id": "ae2:me_p2p_tunnel"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "ae2:quartz_glass",
+    "b": "#c:dusts/glowstone",
+    "c": "#ae2:all_certus_quartz",
+    "d": "#c:ingots/iron",
+    "e": "#c:ingots/copper"
+  },
+  "pattern": [
+    "aba",
+    "bcb",
+    "ded"
+  ],
+  "result": {
+    "count": 2,
+    "id": "ae2:blank_pattern"
+  }
+}

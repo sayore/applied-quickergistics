@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#c:ingots/iron",
+    "b": "minecraft:piston",
+    "c": "#c:ingots/copper"
+  },
+  "pattern": [
+    "aba",
+    "c a",
+    "aba"
+  ],
+  "result": {
+    "id": "ae2:inscriber"
+  }
+}

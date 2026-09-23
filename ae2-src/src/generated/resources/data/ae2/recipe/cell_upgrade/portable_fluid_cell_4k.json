@@ -1,0 +1,18 @@
+{
+  "type": "ae2:storage_cell_disassembly",
+  "cell": "ae2:portable_fluid_cell_4k",
+  "cell_disassembly_items": [
+    {
+      "id": "ae2:me_chest"
+    },
+    {
+      "id": "ae2:energy_cell"
+    },
+    {
+      "id": "ae2:fluid_cell_housing"
+    },
+    {
+      "id": "ae2:cell_component_4k"
+    }
+  ]
+}

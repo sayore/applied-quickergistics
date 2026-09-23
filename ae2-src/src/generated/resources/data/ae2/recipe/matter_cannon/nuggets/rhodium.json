@@ -1,0 +1,14 @@
+{
+  "neoforge:conditions": [
+    {
+      "type": "neoforge:not",
+      "value": {
+        "type": "neoforge:tag_empty",
+        "tag": "c:nuggets/rhodium"
+      }
+    }
+  ],
+  "type": "ae2:matter_cannon",
+  "ammo": "#c:nuggets/rhodium",
+  "weight": 102.9055
+}

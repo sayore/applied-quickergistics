@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "minecraft:redstone_torch",
+    "ae2:calculation_processor"
+  ],
+  "result": {
+    "id": "ae2:level_emitter"
+  }
+}

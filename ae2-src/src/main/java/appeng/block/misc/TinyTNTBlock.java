@@ -1,0 +1,160 @@
+/*
+ * This file is part of Applied Energistics 2.
+ * Copyright (c) 2013 - 2015, AlgorithmX2, All rights reserved.
+ *
+ * Applied Energistics 2 is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Applied Energistics 2 is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with Applied Energistics 2.  If not, see <http://www.gnu.org/licenses/lgpl>.
+ */
+
+package appeng.block.misc;
+
+import org.jetbrains.annotations.Nullable;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.stats.Stats;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.Explosion;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.redstone.Orientation;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.shapes.CollisionContext;
+import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.phys.shapes.VoxelShape;
+
+import appeng.block.AEBaseBlock;
+import appeng.entity.TinyTNTPrimedEntity;
+
+public class TinyTNTBlock extends AEBaseBlock {
+
+    private static final VoxelShape SHAPE = Shapes
+            .create(new AABB(0.25f, 0.0f, 0.25f, 0.75f, 0.5f, 0.75f));
+
+    public TinyTNTBlock(Properties props) {
+        super(props);
+    }
+
+    @Override
+    public VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
+        return SHAPE;
+    }
+
+    @Override
+    protected InteractionResult useItemOn(ItemStack heldItem, BlockState state, Level level, BlockPos pos,
+            Player player, InteractionHand hand, BlockHitResult hit) {
+        if (heldItem.is(Items.FLINT_AND_STEEL) || heldItem.is(Items.FIRE_CHARGE)) {
+            onCaughtFire(state, level, pos, hit.getDirection(), player);
+            level.setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL_IMMEDIATE);
+            Item item = heldItem.getItem();
+            if (!player.isCreative()) {
+                if (heldItem.is(Items.FLINT_AND_STEEL)) {
+                    heldItem.hurtAndBreak(1, player, hand.asEquipmentSlot());
+                } else {
+                    heldItem.shrink(1);
+                }
+            }
+
+            player.awardStat(Stats.ITEM_USED.get(item));
+            return InteractionResult.SUCCESS;
+        }
+        return super.useItemOn(heldItem, state, level, pos, player, hand, hit);
+    }
+
+    @Override
+    public boolean onCaughtFire(BlockState state, Level level, BlockPos pos, @Nullable Direction direction,
+            @Nullable LivingEntity igniter) {
+        this.startFuse(level, pos, igniter);
+        return true;
+    }
+
+    public void startFuse(Level level, BlockPos pos, LivingEntity igniter) {
+        if (!level.isClientSide()) {
+            var primedTinyTNTEntity = new TinyTNTPrimedEntity(level, pos.getX() + 0.5F, pos.getY(),
+                    pos.getZ() + 0.5F, igniter);
+            level.addFreshEntity(primedTinyTNTEntity);
+            level.playSound(null, primedTinyTNTEntity.getX(), primedTinyTNTEntity.getY(),
+                    primedTinyTNTEntity.getZ(), SoundEvents.TNT_PRIMED, SoundSource.BLOCKS, 1, 1);
+        }
+    }
+
+    @Override
+    protected void neighborChanged(BlockState state, Level level, BlockPos pos, Block neighborBlock,
+            @Nullable Orientation orientation, boolean movedByPiston) {
+        if (level.getBestNeighborSignal(pos) > 0) {
+            this.startFuse(level, pos, null);
+            level.removeBlock(pos, false);
+        }
+    }
+
+    @Override
+    public void onPlace(BlockState state, Level level, BlockPos pos, BlockState oldState, boolean isMoving) {
+        super.onPlace(state, level, pos, oldState, isMoving);
+
+        if (level.getBestNeighborSignal(pos) > 0) {
+            this.startFuse(level, pos, null);
+            level.removeBlock(pos, false);
+        }
+    }
+
+    @Override
+    public void stepOn(Level level, BlockPos pos, BlockState state, Entity entity) {
+        if (!level.isClientSide() && entity instanceof AbstractArrow arrow) {
+
+            if (arrow.isOnFire()) {
+                LivingEntity igniter = null;
+                // Check if the shooter still exists
+                Entity shooter = arrow.getOwner();
+                if (shooter instanceof LivingEntity) {
+                    igniter = (LivingEntity) shooter;
+                }
+                this.startFuse(level, pos, igniter);
+                level.removeBlock(pos, false);
+            }
+        }
+    }
+
+    @Override
+    public boolean dropFromExplosion(Explosion exp) {
+        return false;
+    }
+
+    @Override
+    public void wasExploded(ServerLevel level, BlockPos pos, Explosion explosion) {
+        super.wasExploded(level, pos, explosion);
+        if (!level.isClientSide()) {
+            final TinyTNTPrimedEntity primedTinyTNTEntity = new TinyTNTPrimedEntity(level, pos.getX() + 0.5F,
+                    pos.getY(), pos.getZ() + 0.5F, explosion.getIndirectSourceEntity());
+            primedTinyTNTEntity
+                    .setFuse(level.getRandom().nextInt(primedTinyTNTEntity.getFuse() / 4)
+                            + primedTinyTNTEntity.getFuse() / 8);
+            level.addFreshEntity(primedTinyTNTEntity);
+        }
+    }
+
+}

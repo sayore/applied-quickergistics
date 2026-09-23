@@ -1,0 +1,14 @@
+{
+  "neoforge:conditions": [
+    {
+      "type": "neoforge:not",
+      "value": {
+        "type": "neoforge:tag_empty",
+        "tag": "c:nuggets/iodine"
+      }
+    }
+  ],
+  "type": "ae2:matter_cannon",
+  "ammo": "#c:nuggets/iodine",
+  "weight": 126.9045
+}

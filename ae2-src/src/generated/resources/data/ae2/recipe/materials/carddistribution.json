@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "ae2:advanced_card",
+    "ae2:calculation_processor"
+  ],
+  "result": {
+    "id": "ae2:equal_distribution_card"
+  }
+}

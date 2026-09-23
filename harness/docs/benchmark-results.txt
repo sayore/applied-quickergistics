@@ -1,0 +1,30 @@
+=== ae2store benchmark ===
+java            : 26.0.2
+native available: true
+native status   : loaded from /home/rainy/repos/applied-quickergistics/ae2-src/rust/target/release/libae2store_jni.so
+
+scenario: 400 cells, 1500 distinct keys, 2000 iterations
+cell/type pairs actually stored: 124502
+
+  [verified: 1500 keys agree between java and rust]
+getAvailableStacks (full rebuild)
+  java        :    3055,05 us/op
+  rust (jni)  :       8,26 us/op   speedup 370,1x
+
+getAvailableStacks (filtered to 32 keys)
+  java        :     238,08 us/op
+  rust (jni)  :     122,47 us/op   speedup 1,9x
+
+tick churn + getAvailableStacks (cache invalidated each tick)
+  java        :    2925,25 us/op
+  rust (jni)  :     223,28 us/op   speedup 13,1x
+
+extract SIMULATE (single key, 500 items)
+  java        :       0,11 us/op
+  rust (jni)  :       0,06 us/op   speedup 1,8x
+
+insert+extract MODULATE (single key, 64 items each way)
+  java        :       0,26 us/op
+  rust (jni)  :       0,10 us/op   speedup 2,5x
+
+

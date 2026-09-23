@@ -1,0 +1,7 @@
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": "ae2:quartz_bricks",
+  "result": {
+    "id": "ae2:quartz_brick_stairs"
+  }
+}

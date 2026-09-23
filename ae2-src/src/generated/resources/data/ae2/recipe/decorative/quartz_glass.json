@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#ae2:all_quartz_dust",
+    "b": "#c:glass_blocks/cheap"
+  },
+  "pattern": [
+    "aba",
+    "bab",
+    "aba"
+  ],
+  "result": {
+    "count": 4,
+    "id": "ae2:quartz_glass"
+  }
+}

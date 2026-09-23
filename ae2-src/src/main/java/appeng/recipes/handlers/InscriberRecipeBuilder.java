@@ -1,0 +1,64 @@
+package appeng.recipes.handlers;
+
+import java.util.Optional;
+
+import net.minecraft.core.HolderSet;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.data.recipes.RecipeOutput;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStackTemplate;
+import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.level.ItemLike;
+
+public class InscriberRecipeBuilder {
+    private final Ingredient middleInput;
+    private Optional<Ingredient> topOptional = Optional.empty();
+    private Optional<Ingredient> bottomOptional = Optional.empty();
+    private final ItemLike output;
+    private final int count;
+    private InscriberProcessType mode = InscriberProcessType.INSCRIBE;
+
+    public InscriberRecipeBuilder(Ingredient middleInput, ItemLike output, int count) {
+        this.middleInput = middleInput;
+        this.output = output;
+        this.count = count;
+    }
+
+    public static InscriberRecipeBuilder inscribe(ItemLike middle, ItemLike output, int count) {
+        return new InscriberRecipeBuilder(Ingredient.of(middle), output, count);
+    }
+
+    public static InscriberRecipeBuilder inscribe(HolderSet<Item> middle, ItemLike output, int count) {
+        return new InscriberRecipeBuilder(Ingredient.of(middle), output, count);
+    }
+
+    public static InscriberRecipeBuilder inscribe(Ingredient middle, ItemLike output, int count) {
+        return new InscriberRecipeBuilder(middle, output, count);
+    }
+
+    public InscriberRecipeBuilder setTop(Ingredient topOptional) {
+        this.topOptional = Optional.of(topOptional);
+        return this;
+    }
+
+    public InscriberRecipeBuilder setBottom(Ingredient bottomOptional) {
+        this.bottomOptional = Optional.of(bottomOptional);
+        return this;
+    }
+
+    public InscriberRecipeBuilder setMode(InscriberProcessType processType) {
+        this.mode = processType;
+        return this;
+    }
+
+    public void save(RecipeOutput consumer, Identifier id) {
+        var result = new ItemStackTemplate(output.asItem(), count);
+
+        var recipe = new InscriberRecipe(
+                middleInput, result, topOptional, bottomOptional, mode);
+
+        consumer.accept(ResourceKey.create(Registries.RECIPE, id), recipe, null);
+    }
+}

@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#c:ingots/iron",
+    "b": "#c:glass_blocks/cheap",
+    "c": "ae2:annihilation_core",
+    "d": "ae2:formation_core"
+  },
+  "pattern": [
+    "aba",
+    "c d",
+    "aba"
+  ],
+  "result": {
+    "id": "ae2:interface"
+  }
+}

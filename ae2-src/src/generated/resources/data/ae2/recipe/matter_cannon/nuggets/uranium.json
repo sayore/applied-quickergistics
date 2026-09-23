@@ -1,0 +1,14 @@
+{
+  "neoforge:conditions": [
+    {
+      "type": "neoforge:not",
+      "value": {
+        "type": "neoforge:tag_empty",
+        "tag": "c:nuggets/uranium"
+      }
+    }
+  ],
+  "type": "ae2:matter_cannon",
+  "ammo": "#c:nuggets/uranium",
+  "weight": 238.0289
+}

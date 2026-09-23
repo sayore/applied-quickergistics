@@ -1,0 +1,13 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "ae2:formation_core",
+    "#ae2:illuminated_panel",
+    "ae2:logic_processor",
+    "ae2:annihilation_core"
+  ],
+  "result": {
+    "id": "ae2:terminal"
+  }
+}

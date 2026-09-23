@@ -1,0 +1,12 @@
+{
+  "type": "ae2:storage_cell_disassembly",
+  "cell": "ae2:item_storage_cell_16k",
+  "cell_disassembly_items": [
+    {
+      "id": "ae2:item_cell_housing"
+    },
+    {
+      "id": "ae2:cell_component_16k"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#minecraft:wool",
+    "b": "ae2:calculation_processor",
+    "c": "#c:ingots/iron",
+    "d": "#c:chests/wooden"
+  },
+  "pattern": [
+    "aba",
+    "cdc",
+    "ccc"
+  ],
+  "result": {
+    "id": "ae2:cell_workbench"
+  }
+}

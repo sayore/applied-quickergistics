@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#ae2:all_fluix",
+    "b": "ae2:energy_cell",
+    "c": "ae2:engineering_processor",
+    "d": "#c:ingots/iron"
+  },
+  "pattern": [
+    "ab ",
+    "cd ",
+    "  d"
+  ],
+  "result": {
+    "id": "ae2:entropy_manipulator"
+  }
+}

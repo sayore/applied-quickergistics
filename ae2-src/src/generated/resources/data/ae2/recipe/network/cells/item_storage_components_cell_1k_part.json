@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "#c:dusts/redstone",
+    "b": "#ae2:all_certus_quartz",
+    "c": "ae2:logic_processor"
+  },
+  "pattern": [
+    "aba",
+    "bcb",
+    "aba"
+  ],
+  "result": {
+    "id": "ae2:cell_component_1k"
+  }
+}

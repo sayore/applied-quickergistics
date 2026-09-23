@@ -1,0 +1,328 @@
+/*
+ * This file is part of Applied Energistics 2.
+ * Copyright (c) 2025, TeamAppliedEnergistics, All rights reserved.
+ *
+ * Applied Energistics 2 is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Applied Energistics 2 is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with Applied Energistics 2.  If not, see <http://www.gnu.org/licenses/lgpl>.
+ */
+
+package appeng.me.storage;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.jetbrains.annotations.Nullable;
+
+import it.unimi.dsi.fastutil.objects.Reference2ObjectMap;
+import it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap;
+
+import appeng.api.stacks.AEKey;
+import appeng.api.stacks.KeyCounter;
+import appeng.api.storage.MEStorage;
+import appeng.api.storage.VersionedStorage;
+import appeng.storage.nativebridge.DenseKeyInterner;
+import appeng.storage.nativebridge.NativeNetworkIndex;
+
+/**
+ * Optional native (Rust) mirror of a {@link NetworkStorage}'s contents.
+ * <p>
+ * The index is a read accelerator, never a source of truth: {@link NetworkStorage} keeps its own
+ * mounts and stays fully functional without it, and {@link #isEnabled()} is false whenever the native
+ * library is unavailable or the feature was switched off. Only {@code getAvailableStacks} is served
+ * from the mirror; insert/extract keep their original implementation so that all filtering,
+ * prioritisation and side effects stay on the Java side.
+ * <p>
+ * # How the mirror stays in sync
+ * <p>
+ * A mounted storage can be mutated behind {@link NetworkStorage}'s back (an IO port fills a cell, a
+ * storage bus observes an external inventory, ...). Re-reading every cell every tick would cost more
+ * than the native index saves, so storages implement {@link VersionedStorage} and only those whose
+ * version changed are pushed across the JNI boundary.
+ * <p>
+ * # Threading
+ * <p>
+ * Instances belong to the server thread that owns the network. Crafting calculations read
+ * {@code IStorageService#getCachedInventory()} from a separate thread rather than a live network
+ * inventory, so they never touch this class.
+ */
+public final class RustStorageIndex {
+    /**
+     * System property to force the accelerator on or off. When unset it is enabled if the native
+     * library could be loaded.
+     */
+    public static final String ENABLED_PROPERTY = "ae2.native.index";
+
+    private static final boolean ENABLED = resolveEnabled();
+
+    private final NativeNetworkIndex index;
+    private final DenseKeyInterner<AEKey> interner = new DenseKeyInterner();
+
+    /** Mirrored mounts, keyed by the storage instance that was mounted. */
+    private final Reference2ObjectMap<MEStorage, MountedCell> cells = new Reference2ObjectOpenHashMap<>();
+    /** Mounts that have not been pushed to the native side yet. */
+    private final List<MountedCell> pending = new ArrayList<>();
+    /** Scratch buffer for a cell's key ids, reused between pushes. */
+    private long[] idScratch = new long[64];
+    /** Scratch buffer for a cell's amounts, reused between pushes. */
+    private long[] amountScratch = new long[64];
+
+    private RustStorageIndex() {
+        this.index = NativeNetworkIndex.create();
+    }
+
+    /**
+     * @return a new index, or {@code null} if the accelerator is disabled or the native library is
+     *         unavailable.
+     */
+    @Nullable
+    public static RustStorageIndex createIfAvailable() {
+        if (!ENABLED) {
+            return null;
+        }
+        try {
+            return new RustStorageIndex();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    public static boolean isEnabled() {
+        return ENABLED;
+    }
+
+    private static boolean resolveEnabled() {
+        var property = System.getProperty(ENABLED_PROPERTY);
+        if (property != null) {
+            return Boolean.parseBoolean(property);
+        }
+        return appeng.storage.nativebridge.NativeLibrary.isAvailable();
+    }
+
+    public void close() {
+        index.close();
+    }
+
+    /**
+     * Registers a mounted storage. Storages that cannot be mirrored are ignored and cause the mirror
+     * to be unusable for this network until they are unmounted.
+     */
+    public void mount(MEStorage storage, int priority) {
+        if (cells.containsKey(storage)) {
+            setPriority(storage, priority);
+            return;
+        }
+        var cellId = index.addCell(interner.size(), priority);
+        var mounted = new MountedCell(storage, cellId, priority);
+        cells.put(storage, mounted);
+        pending.add(mounted);
+    }
+
+    public void unmount(MEStorage storage) {
+        var mounted = cells.remove(storage);
+        if (mounted != null) {
+            pending.remove(mounted);
+            index.removeCell(mounted.cellId);
+        }
+    }
+
+    public void setPriority(MEStorage storage, int priority) {
+        var mounted = cells.get(storage);
+        if (mounted != null && mounted.priority != priority) {
+            mounted.priority = priority;
+            index.setCellPriority(mounted.cellId, priority);
+        }
+    }
+
+    /**
+     * Mirrors all changed mounts and returns the aggregate.
+     *
+     * @return the aggregate, or {@code null} if a mount cannot be mirrored, in which case the caller
+     *         must use its own code path.
+     */
+    @Nullable
+    public KeyCounter getAvailableStacks() {
+        if (!sync()) {
+            return null;
+        }
+        return toCounter(index.available());
+    }
+
+    /**
+     * Mirrors all changed mounts and returns the aggregate restricted to the given key ids. The ids
+     * are the native ids of this index, i.e. {@link #interner()}.
+     */
+    @Nullable
+    public KeyCounter getAvailableStacks(int[] filterKeyIds) {
+        if (!sync()) {
+            return null;
+        }
+        return toCounter(index.available(filterKeyIds));
+    }
+
+    /**
+     * @return the mirrored amount for a single key, or {@code -1} if the mirror cannot be used.
+     */
+    public long amountOf(AEKey key) {
+        if (!sync()) {
+            return -1;
+        }
+        var id = interner.idOf(key);
+        return id < 0 ? 0 : index.totalOf(id);
+    }
+
+    @Nullable
+    public AEKey keyOf(int keyId) {
+        return interner.keyOf(keyId);
+    }
+
+    public int idOf(AEKey key) {
+        return interner.idOf(key);
+    }
+
+    private KeyCounter toCounter(long[] flat) {
+        var result = new KeyCounter();
+        var keys = interner.keys();
+        for (var i = 0; i + 1 < flat.length; i += 2) {
+            result.add(keys.get((int) flat[i]), flat[i + 1]);
+        }
+        return result;
+    }
+
+    /**
+     * Pushes every mount whose contents changed.
+     *
+     * @return false if any mounted storage cannot be mirrored, meaning the mirror is stale and must
+     *         not be used.
+     */
+    private boolean sync() {
+        for (var i = 0; i < pending.size(); i++) {
+            if (!push(pending.get(i))) {
+                return false;
+            }
+        }
+        if (!pending.isEmpty()) {
+            pending.clear();
+            // Interning may have added keys after the last push, so grow the native key space.
+            index.ensureKeyCapacity(interner.size());
+        }
+
+        for (var mounted : cells.values()) {
+            if (!push(mounted)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @return false if this storage cannot be mirrored.
+     */
+    private boolean push(MountedCell mounted) {
+        var versioned = resolveVersioned(mounted.storage);
+        if (versioned == null) {
+            return false;
+        }
+        var version = versioned.storageVersion();
+        if (mounted.pushed && version == mounted.version) {
+            return true;
+        }
+        mounted.version = version;
+
+        var contents = mounted.storage.getAvailableStacks();
+        var count = contents.size();
+        if (idScratch.length < count) {
+            idScratch = new long[Math.max(count, idScratch.length * 2)];
+            amountScratch = new long[Math.max(count, amountScratch.length * 2)];
+        }
+        var i = 0;
+        for (var entry : contents) {
+            idScratch[i] = interner.intern(entry.getKey());
+            amountScratch[i] = entry.getLongValue();
+            i++;
+        }
+        // The scratch buffers are reused between cells and the native side only sees
+        // `amountScratch.length` entries, so the tail of a previous, larger cell has to be cleared.
+        // Leaving stale ids behind would resurrect a previous cell's contents.
+        java.util.Arrays.fill(idScratch, i, idScratch.length, 0L);
+        java.util.Arrays.fill(amountScratch, i, amountScratch.length, 0L);
+        // Interning may have assigned new ids, so make sure the native key space covers them.
+        index.ensureKeyCapacity(interner.size());
+        index.pushCell(mounted.cellId, interner.size(), idScratch, amountScratch);
+        mounted.pushed = true;
+        mounted.keyCount = i;
+        return true;
+    }
+
+    /**
+     * Finds the {@link VersionedStorage} backing a mount, or {@code null} if the mount cannot be
+     * mirrored.
+     * <p>
+     * Wrappers are transparent for {@code getAvailableStacks} as long as they do not filter the
+     * reported contents and allow extraction; when they do filter, the mirror would over-report and
+     * the mount is rejected. Note that the check must be against {@link DelegatingMEInventory}, not
+     * {@link MEInventoryHandler}: AE2's own drives mount a {@code DriveWatcher}, which is a subclass
+     * that adds status tracking on top of the handler.
+     */
+    @Nullable
+    private static VersionedStorage resolveVersioned(MEStorage storage) {
+        if (storage instanceof MEInventoryHandler handler
+                && (handler.filtersAvailableContents() || !handler.allowsExtraction())) {
+            return null;
+        }
+        if (storage instanceof DelegatingMEInventory delegating) {
+            return resolveVersioned(delegating.getDelegate());
+        }
+        if (storage instanceof VersionedStorage versioned) {
+            return versioned;
+        }
+        return null;
+    }
+
+    /**
+     * Diagnostic snapshot, used by tests and debug tooling.
+     */
+    public record Stats(int mountedCells, int internedKeys, int distinctKeys, long totalAmount) {
+    }
+
+    public Stats stats() {
+        var nativeStats = index.stats();
+        return new Stats(
+                (int) nativeStats[0],
+                interner.size(),
+                (int) nativeStats[2],
+                nativeStats[3]);
+    }
+
+    public NativeNetworkIndex nativeIndex() {
+        return index;
+    }
+
+    public DenseKeyInterner<AEKey> interner() {
+        return interner;
+    }
+
+    private static final class MountedCell {
+        final MEStorage storage;
+        final int cellId;
+        int priority;
+        long version = Long.MIN_VALUE;
+        boolean pushed;
+        int keyCount;
+
+        MountedCell(MEStorage storage, int cellId, int priority) {
+            this.storage = storage;
+            this.cellId = cellId;
+            this.priority = priority;
+        }
+    }
+}

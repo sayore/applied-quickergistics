@@ -1,0 +1,12 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "minecraft:piston",
+    "#ae2:interface",
+    "minecraft:piston"
+  ],
+  "result": {
+    "id": "ae2:storage_bus"
+  }
+}

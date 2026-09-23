@@ -1,0 +1,12 @@
+{
+  "type": "ae2:storage_cell_disassembly",
+  "cell": "ae2:fluid_storage_cell_256k",
+  "cell_disassembly_items": [
+    {
+      "id": "ae2:fluid_cell_housing"
+    },
+    {
+      "id": "ae2:cell_component_256k"
+    }
+  ]
+}

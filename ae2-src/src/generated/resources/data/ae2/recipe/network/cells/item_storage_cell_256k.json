@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "a": "ae2:quartz_glass",
+    "b": "#c:dusts/redstone",
+    "c": "ae2:cell_component_256k",
+    "d": "#c:ingots/iron",
+    "e": "#c:ingots/copper"
+  },
+  "pattern": [
+    "aba",
+    "bcb",
+    "ded"
+  ],
+  "result": {
+    "id": "ae2:item_storage_cell_256k"
+  }
+}

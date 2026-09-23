@@ -1,0 +1,10 @@
+{
+  "type": "ae2:inscriber",
+  "ingredients": {
+    "middle": "#c:gems/fluix"
+  },
+  "mode": "inscribe",
+  "result": {
+    "id": "ae2:fluix_dust"
+  }
+}

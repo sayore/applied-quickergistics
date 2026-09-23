@@ -1,0 +1,15 @@
+# Build outputs
+ae2-src/build/
+ae2-src/.gradle/
+ae2-src/buildSrc/build/
+ae2-src/buildSrc/.gradle/
+ae2-src/run/
+harness/out/
+harness/logs/
+
+# Rust build outputs (the crate sources are tracked, the build artifacts are not)
+ae2-src/rust/target/
+
+# Editor/OS noise
+*.swp
+.DS_Store

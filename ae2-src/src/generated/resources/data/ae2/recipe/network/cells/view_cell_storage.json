@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "ae2:item_cell_housing",
+    "#ae2:all_certus_quartz"
+  ],
+  "result": {
+    "id": "ae2:view_cell"
+  }
+}

@@ -1,0 +1,12 @@
+// Init script that dumps AE2's test runtime classpath, so the native bridge and the benchmark can be
+// compiled and run in a plain JVM (the Gradle test task goes through the FML test harness).
+gradle.projectsEvaluated {
+    def p = gradle.rootProject
+    p.tasks.register('printTestClasspath') {
+        doLast {
+            def cp = p.sourceSets.test.runtimeClasspath.files.collect { it.absolutePath }.join(':')
+            new File(System.getProperty('ae2.classpath.out', '/tmp/ae2-test-cp.txt')).text = cp
+            println "wrote test runtime classpath (${cp.length()} chars)"
+        }
+    }
+}

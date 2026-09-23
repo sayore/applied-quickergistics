@@ -1,0 +1,91 @@
+/*
+ * This file is part of Applied Energistics 2.
+ * Copyright (c) 2013 - 2014, AlgorithmX2, All rights reserved.
+ *
+ * Applied Energistics 2 is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Applied Energistics 2 is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with Applied Energistics 2.  If not, see <http://www.gnu.org/licenses/lgpl>.
+ */
+
+package appeng.parts.reporting;
+
+import java.util.List;
+
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.inventory.MenuType;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.storage.ValueInput;
+import net.minecraft.world.level.storage.ValueOutput;
+
+import appeng.api.inventories.InternalInventory;
+import appeng.api.parts.IPartItem;
+import appeng.core.AppEng;
+import appeng.menu.me.items.CraftingTermMenu;
+import appeng.util.inv.AppEngInternalInventory;
+
+public class CraftingTerminalPart extends AbstractTerminalPart {
+
+    /**
+     * A sub-inventory that contains crafting ingredients used in the crafting grid.
+     */
+    public static final Identifier INV_CRAFTING = AppEng.makeId("crafting_terminal_crafting");
+
+    private final AppEngInternalInventory craftingGrid = new AppEngInternalInventory(this, 9);
+
+    public CraftingTerminalPart(IPartItem<?> partItem) {
+        super(partItem);
+    }
+
+    @Override
+    public void addAdditionalDrops(List<ItemStack> drops, boolean wrenched) {
+        super.addAdditionalDrops(drops, wrenched);
+        for (var is : this.craftingGrid) {
+            if (!is.isEmpty()) {
+                drops.add(is);
+            }
+        }
+    }
+
+    @Override
+    public void clearContent() {
+        super.clearContent();
+        craftingGrid.clear();
+    }
+
+    @Override
+    public void readFromNBT(ValueInput input) {
+        super.readFromNBT(input);
+        this.craftingGrid.readFromNBT(input, "craftingGrid");
+    }
+
+    @Override
+    public void writeToNBT(ValueOutput output) {
+        super.writeToNBT(output);
+        this.craftingGrid.writeToNBT(output, "craftingGrid");
+    }
+
+    @Override
+    public MenuType<?> getMenuType(Player p) {
+        return CraftingTermMenu.TYPE;
+    }
+
+    @Override
+    public InternalInventory getSubInventory(Identifier id) {
+        if (id.equals(INV_CRAFTING)) {
+            return craftingGrid;
+        } else {
+            return super.getSubInventory(id);
+        }
+    }
+
+}
