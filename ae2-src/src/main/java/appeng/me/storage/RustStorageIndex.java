@@ -75,6 +75,11 @@ public final class RustStorageIndex {
     private long[] idScratch = new long[64];
     /** Scratch buffer for a cell's amounts, reused between pushes. */
     private long[] amountScratch = new long[64];
+    /**
+     * Set by {@link #mount} and {@link #unmount}. A delta consumer cannot apply changes across a
+     * mount change, so it has to do a full refresh instead.
+     */
+    private boolean mountsChanged;
 
     private RustStorageIndex() {
         this.index = NativeNetworkIndex.create();
@@ -125,6 +130,7 @@ public final class RustStorageIndex {
         var mounted = new MountedCell(storage, cellId, priority);
         cells.put(storage, mounted);
         pending.add(mounted);
+        mountsChanged = true;
     }
 
     public void unmount(MEStorage storage) {
@@ -132,6 +138,7 @@ public final class RustStorageIndex {
         if (mounted != null) {
             pending.remove(mounted);
             index.removeCell(mounted.cellId);
+            mountsChanged = true;
         }
     }
 
@@ -256,6 +263,9 @@ public final class RustStorageIndex {
             index.ensureKeyCapacity(interner.size());
         }
 
+        // Long-lived cells are re-read in the same pass, but `push` compares the storage version it
+        // last mirrored against the current one, so a cell that several mutations touched during one
+        // tick is still only re-read once per sync.
         for (var mounted : cells.values()) {
             if (!push(mounted)) {
                 return false;
@@ -341,6 +351,68 @@ public final class RustStorageIndex {
                 interner.size(),
                 (int) nativeStats[2],
                 nativeStats[3]);
+    }
+
+    /**
+     * Whether the incremental tick refresh may be used.
+     * <p>
+     * Off by default on purpose. The change log itself is complete and verified, but the mirror
+     * currently reports too many changes: it records roughly 350 changes per actual mutation on a
+     * 400-cell network, because a cell whose version changed is re-pushed and its whole content is
+     * subtracted and re-added. Applying that many changes costs more than one full aggregate, so the
+     * path stays disabled until the mirror's push behaviour is narrowed. See the crate documentation
+     * for the measurement.
+     */
+    public static final String INCREMENTAL_PROPERTY = "ae2.native.incremental";
+
+    public static boolean isIncrementalRefreshEnabled() {
+        return Boolean.getBoolean(INCREMENTAL_PROPERTY);
+    }
+
+    /**
+     * Mirrors all changed mounts and returns the network-total changes since {@code sinceRevision}.
+     * <p>
+     * This is the per-tick path: a consumer that stayed in sync receives only the keys that actually
+     * changed, instead of an aggregate of every stored type.
+     *
+     * @return the changes, or {@code null} when the caller has to fall back to a full
+     *         {@link #getAvailableStacks()}. That happens when the mount set changed, so the deltas
+     *         cannot describe it, and when the native side no longer retains that revision.
+     */
+    @Nullable
+    public ChangeSet deltasSince(long sinceRevision) {
+        if (!sync()) {
+            return null;
+        }
+        if (mountsChanged) {
+            mountsChanged = false;
+            return null;
+        }
+        var nativeChanges = index.deltasSince(sinceRevision);
+        if (nativeChanges == null) {
+            return null;
+        }
+        var keys = interner.keys();
+        var changes = new ArrayList<KeyChange>(nativeChanges.changes().length);
+        for (var change : nativeChanges.changes()) {
+            changes.add(new KeyChange(keys.get(change.keyId()), change.oldTotal(), change.newTotal()));
+        }
+        return new ChangeSet(nativeChanges.revision(), changes);
+    }
+
+    /**
+     * The revision the mirror's totals are at, or {@code -1} when the mirror is unusable.
+     */
+    public long revision() {
+        return index.deltaRevision();
+    }
+
+    /** One key's total changing from {@code oldTotal} to {@code newTotal}. */
+    public record KeyChange(AEKey key, long oldTotal, long newTotal) {
+    }
+
+    /** A replayable run of changes ending at {@code revision}. */
+    public record ChangeSet(long revision, List<KeyChange> changes) {
     }
 
     public NativeNetworkIndex nativeIndex() {

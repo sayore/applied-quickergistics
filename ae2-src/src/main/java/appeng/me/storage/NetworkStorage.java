@@ -252,6 +252,30 @@ public class NetworkStorage implements MEStorage {
         }
     }
 
+    /**
+     * Network-total changes since {@code sinceRevision}, for consumers that stay in sync tick by tick.
+     * <p>
+     * Returns {@code null} when the caller has to use {@link #getAvailableStacks(KeyCounter)} instead:
+     * the native mirror is unavailable, or the changes are not replayable from that revision (a mount
+     * changed, or the native side no longer retains it).
+     */
+    @Nullable
+    public RustStorageIndex.ChangeSet deltasSince(long sinceRevision) {
+        var index = this.nativeIndex;
+        if (index == null || mountsInUse) {
+            return null;
+        }
+        return index.deltasSince(sinceRevision);
+    }
+
+    /**
+     * The revision the network totals are at, or {@code -1} when the native mirror is unavailable.
+     */
+    public long revision() {
+        var index = this.nativeIndex;
+        return index == null ? -1 : index.revision();
+    }
+
     @Override
     public Component getDescription() {
         return GuiText.MENetworkStorage.text();

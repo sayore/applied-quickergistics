@@ -322,6 +322,52 @@ pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_compact(
     }
 }
 
+/// Changes to network totals since `since_revision`.
+///
+/// Layout, all in one `long[]`:
+/// `[status, currentRevision, keyId0, oldTotal0, newTotal0, cellId0, keyId1, ...]`
+/// with `status` 1 when the range was replayable and 0 when the caller must recompute the
+/// aggregate. Returning one flat array keeps this to a single JNI crossing per tick.
+#[no_mangle]
+pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_deltasSince(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    since_revision: jlong,
+) -> jlongArray {
+    let Some(h) = (unsafe { handle_ref(handle) }) else {
+        return long_array(&mut env, &[0, 0]);
+    };
+    match h.index.deltas_since(since_revision.max(0) as u64) {
+        Some((revision, changes)) => {
+            let mut flat = Vec::with_capacity(2 + changes.len() * 4);
+            flat.push(1);
+            flat.push(revision as i64);
+            for change in changes {
+                flat.push(change.id as i64);
+                flat.push(change.old_total);
+                flat.push(change.new_total);
+                flat.push(change.cell_id as i64);
+            }
+            long_array(&mut env, &flat)
+        }
+        None => long_array(&mut env, &[0, h.index.delta_revision() as i64]),
+    }
+}
+
+/// The revision the network totals are currently at.
+#[no_mangle]
+pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_deltaRevision(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jlong {
+    match unsafe { handle_ref(handle) } {
+        Some(h) => h.index.delta_revision() as jlong,
+        None => 0,
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_stats(
     mut env: JNIEnv,

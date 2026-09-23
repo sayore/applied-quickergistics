@@ -18,6 +18,8 @@
 
 package appeng.storage.nativebridge;
 
+import org.jetbrains.annotations.Nullable;
+
 /**
  * Thin, allocation-conscious wrapper around the {@code ae2store} Rust network index.
  * <p>
@@ -174,6 +176,47 @@ public final class NativeNetworkIndex implements AutoCloseable {
     public void compact() {
         requireOpen();
         NativeBindings.compact(handle);
+    }
+
+    /**
+     * A change to one key's network-wide total.
+     */
+    public record TotalChange(int keyId, long oldTotal, long newTotal, int cellId) {
+    }
+
+    /** A replayable run of changes ending at {@code revision}. */
+    public record ChangeSet(long revision, TotalChange[] changes) {
+    }
+
+    /**
+     * Changes to network totals since {@code sinceRevision}.
+     *
+     * @return the changes, or {@code null} when that range is no longer replayable and the caller has
+     *         to recompute the aggregate instead.
+     */
+    @Nullable
+    public ChangeSet deltasSince(long sinceRevision) {
+        requireOpen();
+        var flat = NativeBindings.deltasSince(handle, sinceRevision);
+        if (flat.length < 2 || flat[0] == 0) {
+            return null;
+        }
+        var revision = flat[1];
+        var count = (flat.length - 2) / 4;
+        var changes = new TotalChange[count];
+        for (var i = 0; i < count; i++) {
+            var at = 2 + i * 4;
+            changes[i] = new TotalChange((int) flat[at], flat[at + 1], flat[at + 2], (int) flat[at + 3]);
+        }
+        return new ChangeSet(revision, changes);
+    }
+
+    /**
+     * @return the revision the network totals are currently at.
+     */
+    public long deltaRevision() {
+        requireOpen();
+        return NativeBindings.deltaRevision(handle);
     }
 
     /**

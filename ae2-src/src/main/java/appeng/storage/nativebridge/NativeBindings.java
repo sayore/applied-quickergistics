@@ -67,6 +67,11 @@ final class NativeBindings {
 
     static native long[] stats(long handle);
 
+    static native long[] deltasSince(long handle, long sinceRevision);
+
+    static native long deltaRevision(long handle);
+
+
 
 
 }

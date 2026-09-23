@@ -58,6 +58,7 @@ import appeng.api.storage.MEStorage;
 import appeng.me.helpers.InterestManager;
 import appeng.me.helpers.StackWatcher;
 import appeng.me.storage.NetworkStorage;
+import appeng.me.storage.RustStorageIndex;
 import appeng.util.JsonStreamUtil;
 
 public class StorageService implements IStorageService, IGridServiceProvider {
@@ -85,6 +86,11 @@ public class StorageService implements IStorageService, IGridServiceProvider {
      */
     private final Object2LongMap<AEKey> cachedAvailableAmounts = new Object2LongOpenHashMap<>();
     private boolean cachedStacksNeedUpdate = true;
+    /**
+     * Native revision the cached inventory corresponds to, or {@code -1} when the incremental path
+     * cannot be used (no native mirror, or the cache has never been built).
+     */
+    private long cachedRevision = -1;
     /**
      * Tracks the stack watcher associated with a given grid node. Needed to clean up watchers when the node leaves the
      * grid.
@@ -114,6 +120,18 @@ public class StorageService implements IStorageService, IGridServiceProvider {
         try {
             cachedStacksNeedUpdate = false;
 
+            // Fast path: when the native mirror can report exactly what changed since the last
+            // refresh, only the changed keys have to be touched instead of every key in the network.
+            // That is the difference between work proportional to the size of the network and work
+            // proportional to what actually happened during this tick.
+            if (cachedRevision >= 0 && RustStorageIndex.isIncrementalRefreshEnabled()) {
+                var deltas = storage.deltasSince(cachedRevision);
+                if (deltas != null) {
+                    applyDeltas(deltas);
+                    return;
+                }
+            }
+
             cachedAvailableStacks.clear();
             storage.getAvailableStacks(cachedAvailableStacks);
             // clear() only clears the inner maps,
@@ -141,9 +159,41 @@ public class StorageService implements IStorageService, IGridServiceProvider {
             for (var entry : cachedAvailableStacks) {
                 cachedAvailableAmounts.put(entry.getKey(), entry.getLongValue());
             }
+
+            // Remember which revision this cache reflects, so the next tick can go incremental.
+            cachedRevision = storage.revision();
         } finally {
             inventoryRefreshStats.add(System.nanoTime() - time);
         }
+    }
+
+    /**
+     * Applies a replayable run of network-total changes to the cached inventory and notifies the
+     * watchers whose value changed.
+     * <p>
+     * The observable result is identical to a full rebuild: a watcher is notified when its key's
+     * total changes, and a key that drops to zero is removed from the cache rather than left behind
+     * as a zero entry, which would leak when keys churn.
+     */
+    private void applyDeltas(RustStorageIndex.ChangeSet deltas) {
+        for (var change : deltas.changes()) {
+            var what = change.key();
+            var oldAmount = change.oldTotal();
+            var newAmount = change.newTotal();
+
+            if (newAmount == 0) {
+                cachedAvailableStacks.remove(what);
+                cachedAvailableAmounts.removeLong(what);
+            } else {
+                cachedAvailableStacks.set(what, newAmount);
+                cachedAvailableAmounts.put(what, newAmount);
+            }
+
+            if (oldAmount != newAmount) {
+                postWatcherUpdate(what, newAmount);
+            }
+        }
+        cachedRevision = deltas.revision();
     }
 
     private void postWatcherUpdate(AEKey what, long newAmount) {

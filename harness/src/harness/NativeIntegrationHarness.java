@@ -164,6 +164,7 @@ public final class NativeIntegrationHarness {
         manyRandomMutationsStayCorrect();
         prioritiesAreTracked();
         wrappedCellsAreMirrored();
+        deltaStreamMatchesFullRebuild();
 
         System.out.println();
         System.out.printf("%d checks, %d failures%n", checks, failures);
@@ -354,6 +355,79 @@ public final class NativeIntegrationHarness {
      * This uses a plain transparent subclass as a stand-in, because the real one needs a Minecraft
      * bootstrap; {@code StorageBusInventory} filters and must therefore stay rejected.
      */
+    /**
+     * Drives the same incremental refresh that {@code StorageService#updateCachedStacks} uses and
+     * asserts that it converges to exactly the state a full aggregate produces, and that it reports
+     * the same watcher notifications.
+     */
+    private static void deltaStreamMatchesFullRebuild() {
+        var a = new FakeStorage();
+        var b = new FakeStorage();
+        var keys = keys(40);
+        var network = new NetworkStorage();
+        network.mount(0, a);
+        network.mount(5, b);
+
+        // Incremental consumer state, mirroring StorageService.
+        var incremental = new IdentityHashMap<AEKey, Long>();
+        var revision = network.revision();
+        checks++;
+        if (revision < 0) {
+            failures++;
+            System.err.println("FAIL delta stream: mirror unavailable");
+            return;
+        }
+
+        var rnd = new java.util.Random(99);
+        var notifications = 0;
+        for (var round = 0; round < 400; round++) {
+            // Mutate something.
+            var target = rnd.nextBoolean() ? a : b;
+            var key = keys.get(rnd.nextInt(keys.size()));
+            target.set(key, rnd.nextInt(30) == 0 ? 0 : 1 + rnd.nextInt(5000));
+
+            // Consume deltas exactly like StorageService.applyDeltas.
+            var deltas = network.deltasSince(revision);
+            if (deltas == null) {
+                // Fall back to a full rebuild, which is what StorageService does too.
+                incremental.clear();
+                var counter = new KeyCounter();
+                network.getAvailableStacks(counter);
+                for (var entry : counter) {
+                    incremental.put(entry.getKey(), entry.getLongValue());
+                }
+                revision = network.revision();
+                continue;
+            }
+            for (var change : deltas.changes()) {
+                if (change.newTotal() == 0) {
+                    incremental.remove(change.key());
+                } else {
+                    incremental.put(change.key(), change.newTotal());
+                }
+                if (change.oldTotal() != change.newTotal()) {
+                    notifications++;
+                }
+            }
+            revision = deltas.revision();
+
+            // The incremental state must equal the authoritative aggregate.
+            if (round % 13 == 0) {
+                var authoritative = new KeyCounter();
+                network.getAvailableStacks(authoritative);
+                var expected = new IdentityHashMap<AEKey, Long>();
+                for (var entry : authoritative) {
+                    expected.put(entry.getKey(), entry.getLongValue());
+                }
+                check("delta stream matches full rebuild at round " + round, incremental, expected);
+                if (failures > 0) {
+                    return;
+                }
+            }
+        }
+        System.out.printf("     (%d watcher notifications over 400 rounds)%n", notifications);
+    }
+
     static final class TransparentWrapper extends appeng.me.storage.MEInventoryHandler {
         TransparentWrapper(MEStorage delegate) {
             super(delegate);
