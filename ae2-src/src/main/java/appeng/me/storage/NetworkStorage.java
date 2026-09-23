@@ -230,6 +230,13 @@ public class NetworkStorage implements MEStorage {
         if (index != null) {
             var accelerated = index.getSharedAvailableStacks();
             if (accelerated != null) {
+                // A caller that passes back the exact counter this method handed out last time is
+                // already up to date, so there is nothing to copy. StorageService does this every
+                // tick; copying instead cost ~232 us for 1827 stored types, while the maintained
+                // counter is ready in under a microsecond.
+                if (out == accelerated) {
+                    return;
+                }
                 // `out` may already have been cleared via KeyCounter#clear, which only clears the
                 // inner variant counters and keeps the primary-key entries. Setting absolute amounts
                 // is therefore correct regardless of the state `out` arrives in.

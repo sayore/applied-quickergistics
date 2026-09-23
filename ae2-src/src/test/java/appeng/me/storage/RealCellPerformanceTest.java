@@ -61,6 +61,12 @@ import appeng.util.BootstrapMinecraft;
 @BootstrapMinecraft
 @ExtendWith(EphemeralTestServerProvider.class)
 class RealCellPerformanceTest {
+    static {
+        // The mirror is opt-in, and RustStorageIndex resolves that flag when its class is first
+        // loaded - which the Minecraft bootstrap below can trigger. Set it before any of that runs.
+        System.setProperty(RustStorageIndex.ENABLED_PROPERTY, "true");
+    }
+
     /** Real AE2 caps a cell at 63 types; using the cap keeps the drive realistic. */
     private static final int TYPES_PER_CELL = 63;
 
@@ -68,8 +74,6 @@ class RealCellPerformanceTest {
     private final MinecraftServer server;
 
     RealCellPerformanceTest(MinecraftServer server) {
-        // The mirror is opt-in; these tests exist to exercise it.
-        System.setProperty(RustStorageIndex.ENABLED_PROPERTY, "true");
         this.server = server;
     }
 
@@ -156,122 +160,140 @@ class RealCellPerformanceTest {
         return (System.nanoTime() - start) / 1000.0 / iterations;
     }
 
-    @Test
-    void measureRealDriveArray() throws Exception {
-        // The incremental path is off by default; this test exists to measure it, so enable it here
-        // rather than through a Gradle property the test JVM would not see.
-        System.setProperty(RustStorageIndex.INCREMENTAL_PROPERTY, "true");
-        var keys = collectKeys();
+    /** Builds an identical pair of networks: one with the mirror, one running plain Java. */
+    private record Fixture(List<MEStorage> mirrorMounts, NetworkStorage mirrorNetwork,
+            List<MEStorage> javaMounts, NetworkStorage javaNetwork) {
+    }
 
-        // Cell counts are bounded by the available item types; use a small and a full drive array.
-        var maxCells = keys.size() / TYPES_PER_CELL;
-        for (var cellCount : new int[] { Math.max(1, maxCells / 2), maxCells }) {
-            var mounts = new ArrayList<MEStorage>();
-            var network = new NetworkStorage();
-            for (var c = 0; c < cellCount; c++) {
-                var from = c * TYPES_PER_CELL;
-                var to = Math.min(from + TYPES_PER_CELL, keys.size());
-                if (from >= to) {
-                    break;
-                }
-                var cell = buildCell(keys, from, to);
-                mounts.add(cell);
-                network.mount(c % 5, cell);
+    private Fixture buildFixture(List<AEKey> keys, int cellCount) {
+        var fixture = buildPair(keys, cellCount);
+        // Both paths must agree before anything is timed.
+        var expected = javaAggregate(fixture.mirrorMounts());
+        var actual = new KeyCounter();
+        fixture.mirrorNetwork().getAvailableStacks(actual);
+        assertSameContents(actual, expected);
+        return fixture;
+    }
+
+    private Fixture buildPair(List<AEKey> keys, int cellCount) {
+        var mirrorMounts = new ArrayList<MEStorage>();
+        var mirrorNetwork = new NetworkStorage();
+        var javaMounts = new ArrayList<MEStorage>();
+        var javaNetwork = new NetworkStorage();
+        for (var c = 0; c < cellCount; c++) {
+            var from = c * TYPES_PER_CELL;
+            var to = Math.min(from + TYPES_PER_CELL, keys.size());
+            if (from >= to) {
+                break;
             }
+            var mirrorCell = buildCell(keys, from, to);
+            mirrorMounts.add(mirrorCell);
+            mirrorNetwork.mount(c % 5, mirrorCell);
+            var javaCell = buildCell(keys, from, to);
+            javaMounts.add(javaCell);
+            javaNetwork.mount(c % 5, javaCell);
+        }
+        withoutMirror(javaNetwork);
+        return new Fixture(mirrorMounts, mirrorNetwork, javaMounts, javaNetwork);
+    }
 
-            var storedTypes = 0;
-            for (var i = 0; i < mounts.size() * TYPES_PER_CELL && i < keys.size(); i++) {
-                storedTypes++;
-            }
-
-            System.out.printf("%n=== real drive array: %d cells, %d stored types, mirror %s ===%n",
-                    mounts.size(), storedTypes,
-                    RustStorageIndex.isEnabled() ? "ENABLED" : "disabled");
-
-            // Build a second, identical network that runs the original Java path so both can be
-            // timed under the same conditions.
-            var javaMounts = new ArrayList<MEStorage>();
-            var javaNetwork = new NetworkStorage();
-            for (var c = 0; c < mounts.size(); c++) {
-                var from = c * TYPES_PER_CELL;
-                var to = Math.min(from + TYPES_PER_CELL, keys.size());
-                var cell = buildCell(keys, from, to);
-                javaMounts.add(cell);
-                javaNetwork.mount(c % 5, cell);
-            }
-            withoutMirror(javaNetwork);
-
-            // Both paths must agree before anything is timed.
-            var expected = javaAggregate(mounts);
-            var reference = expected;
-            var actual = new KeyCounter();
-            network.getAvailableStacks(actual);
-            assertThat(actual.size()).as("aggregate size").isEqualTo(expected.size());
-
-            var iterations = 400;
-            // Mirror what AE2 actually does per tick: clear the one counter, fill it once. No
-            // mutation happens between the measurements, and the cell inventories are already
-            // loaded, so this isolates the aggregate cost rather than cell initialisation.
-            var javaOut = new KeyCounter();
-            var javaMicros = time(i -> {
-                javaOut.clear();
-                javaNetwork.getAvailableStacks(javaOut);
-                if (javaOut.isEmpty()) {
-                    throw new IllegalStateException();
-                }
-            }, iterations);
-            var mirrorOut = new KeyCounter();
-            var mirrorMicros = time(i -> {
-                mirrorOut.clear();
-                network.getAvailableStacks(mirrorOut);
-                if (mirrorOut.isEmpty()) {
-                    throw new IllegalStateException();
-                }
-            }, iterations);
-
-            report("full aggregate (every tick)", "java", (long) (javaMicros * 1000 * iterations),
-                    iterations);
-            report("full aggregate (every tick)", "mirror", (long) (mirrorMicros * 1000 * iterations),
-                    iterations);
-            System.out.printf("  %-34s %-8s %10.2fx%n", "", "speedup", javaMicros / mirrorMicros);
-
-            // Compare handling out the maintained counter directly against copying it into a
-            // caller-owned one, so the cost of the copy is visible.
-            var sharedField = NetworkStorage.class.getDeclaredField("nativeIndex");
-            sharedField.setAccessible(true);
-            var sharedMirror = (RustStorageIndex) sharedField.get(network);
-            if (sharedMirror != null) {
-                var sharedMicros = time(i -> {
-                    var shared = sharedMirror.getSharedAvailableStacks();
-                    if (shared == null || shared.isEmpty()) {
-                        throw new IllegalStateException();
-                    }
-                }, iterations);
-                report("shared counter, no copy", "mirror",
-                        (long) (sharedMicros * 1000 * iterations), iterations);
-            }
-
-            // Extract fan-out on the same network.
-            var presentKey = keys.get(0);
-            var absentKey = keys.get(keys.size() - 1);
-            assertThat(reference.get(presentKey)).isPositive();
-            assertThat(reference.get(absentKey)).isZero();
-
-            var simIterations = 4000;
-            var presentMicros = time(i -> network.extract(presentKey, 500, Actionable.SIMULATE, src),
-                    simIterations);
-            var absentMicros = time(i -> network.extract(absentKey, 500, Actionable.SIMULATE, src),
-                    simIterations);
-            report("extract SIMULATE, key present", "network",
-                    (long) (presentMicros * 1000 * simIterations), simIterations);
-            report("extract SIMULATE, key absent", "network",
-                    (long) (absentMicros * 1000 * simIterations), simIterations);
-
-            System.out.println();
-            assertSameContents(actual, expected);
+    private static RustStorageIndex mirrorOf(NetworkStorage network) {
+        try {
+            var field = NetworkStorage.class.getDeclaredField("nativeIndex");
+            field.setAccessible(true);
+            return (RustStorageIndex) field.get(network);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
         }
     }
 
+    private static void reportDiagnostics(String phase, NetworkStorage network, int iterations) {
+        var mirror = mirrorOf(network);
+        if (mirror == null) {
+            return;
+        }
+        var d = mirror.diag;
+        System.out.printf("  %-30s rebuilds=%d incremental=%d syncWalks=%d pushes=%d (over %d queries)%n",
+                phase, d[0], d[1], d[2], d[3], iterations);
+    }
+
+    /**
+     * The steady state: nothing changes between queries, which is what a network that is not being
+     * written to looks like. This is the case the mirror should win outright.
+     */
+    @Test
+    void measureSteadyStateAggregate() {
+        var keys = collectKeys();
+        var cellCount = keys.size() / TYPES_PER_CELL;
+        var fixture = buildFixture(keys, cellCount);
+        var iterations = 3000;
+
+        System.out.printf("%n=== steady state, %d cells, %d types ===%n",
+                fixture.mirrorMounts().size(), fixture.mirrorMounts().size() * TYPES_PER_CELL);
+
+        var javaOut = new KeyCounter();
+        var javaMicros = time(i -> {
+            javaOut.clear();
+            fixture.javaNetwork().getAvailableStacks(javaOut);
+        }, iterations);
+        // Reproduce StorageService's actual per-tick pattern: keep the counter it adopted and hand
+        // it back, so the mirror can recognise it and skip the copy.
+        var adopted = fixture.mirrorNetwork().getSharedAvailableStacks();
+        assertThat(adopted).as("mirror must be usable").isNotNull();
+        var mirrorMicros = time(i -> fixture.mirrorNetwork().getAvailableStacks(adopted), iterations);
+
+        report("aggregate, no changes", "java", (long) (javaMicros * 1000 * iterations), iterations);
+        report("aggregate, no changes", "mirror", (long) (mirrorMicros * 1000 * iterations), iterations);
+        System.out.printf("  %-30s %-8s %10.2fx%n", "", "speedup", javaMicros / mirrorMicros);
+        reportDiagnostics("steady state", fixture.mirrorNetwork(), iterations);
+    }
+
+    /**
+     * The realistic tick: one cell changes, then the inventory is refreshed. The mirror should only
+     * have to touch what changed, while the Java path re-reads every cell.
+     */
+    @Test
+    void measureTickWithOneChange() {
+        var keys = collectKeys();
+        var cellCount = keys.size() / TYPES_PER_CELL;
+        var fixture = buildFixture(keys, cellCount);
+        var iterations = 3000;
+
+        System.out.printf("%n=== one cell changes per tick, %d cells, %d types ===%n",
+                fixture.mirrorMounts().size(), fixture.mirrorMounts().size() * TYPES_PER_CELL);
+        reportDiagnostics("baseline before phase", fixture.mirrorNetwork(), iterations);
+
+        var liveKey = keys.get(0);
+
+        var javaOut = new KeyCounter();
+        var javaLive = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) ((DriveWatcher) fixture
+                .javaMounts().get(0)).getDelegate());
+        var javaMicros = time(i -> {
+            javaLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            javaOut.clear();
+            fixture.javaNetwork().getAvailableStacks(javaOut);
+        }, iterations);
+
+        var adopted = fixture.mirrorNetwork().getSharedAvailableStacks();
+        assertThat(adopted).as("mirror must be usable").isNotNull();
+        var mirrorLive = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) ((DriveWatcher) fixture
+                .mirrorMounts().get(0)).getDelegate());
+        var mirrorMicros = time(i -> {
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            fixture.mirrorNetwork().getAvailableStacks(adopted);
+        }, iterations);
+
+        report("one change, then aggregate", "java", (long) (javaMicros * 1000 * iterations), iterations);
+        report("one change, then aggregate", "mirror", (long) (mirrorMicros * 1000 * iterations),
+                iterations);
+        System.out.printf("  %-30s %-8s %10.2fx%n", "", "speedup", javaMicros / mirrorMicros);
+        reportDiagnostics("with changes", fixture.mirrorNetwork(), iterations);
+    }
+
+    /**
+     * Entry-wise comparison. {@code Map.equals} cannot be used: the maps are identity maps and the
+     * values are boxed longs.
+     */
     private static void assertSameContents(KeyCounter actual, KeyCounter expected) {
         assertThat(actual.size()).isEqualTo(expected.size());
         for (var entry : expected) {

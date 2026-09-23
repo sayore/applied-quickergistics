@@ -57,11 +57,15 @@ import appeng.util.BootstrapMinecraft;
 @BootstrapMinecraft
 @ExtendWith(EphemeralTestServerProvider.class)
 class RustRealCellTest {
+    static {
+        // The mirror is opt-in, and RustStorageIndex resolves that flag when its class is first
+        // loaded - which the Minecraft bootstrap below can trigger. Set it before any of that runs.
+        System.setProperty(RustStorageIndex.ENABLED_PROPERTY, "true");
+    }
+
     private final BaseActionSource src = new BaseActionSource();
 
     RustRealCellTest(MinecraftServer server) {
-        // The mirror is opt-in; these tests exist to exercise it.
-        System.setProperty(RustStorageIndex.ENABLED_PROPERTY, "true");
     }
 
     private static AEItemKey key(ItemStack stack) {

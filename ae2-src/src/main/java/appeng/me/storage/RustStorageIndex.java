@@ -143,6 +143,7 @@ public final class RustStorageIndex {
         cells.put(storage, mounted);
         pending.add(mounted);
         mountsChanged = true;
+        lastScannedRevision = -1;
     }
 
     public void unmount(MEStorage storage) {
@@ -151,6 +152,7 @@ public final class RustStorageIndex {
             pending.remove(mounted);
             index.removeCell(mounted.cellId);
             mountsChanged = true;
+            lastScannedRevision = -1;
         }
     }
 
@@ -185,6 +187,20 @@ public final class RustStorageIndex {
      * Revision {@link #maintainedCounter} reflects, or {@code -1} when it has to be rebuilt.
      */
     private long maintainedRevision = -1;
+    /**
+     * Native revision at which every mount was last checked for changes, or {@code -1} to force a
+     * rescan. Nothing can have changed while the revision is unchanged.
+     */
+    private long lastScannedRevision = -1;
+    /**
+     * Set when a mount was added or removed, which the native revision cannot express. A forced
+     * rescan is what makes an out-of-band mutation visible again.
+     */
+    private boolean rescanWanted = true;
+    /**
+     * Diagnostics: {@code [rebuilds, incrementalUpdates, syncWalks, pushes]}.
+     */
+    public final long[] diag = new long[4];
 
     /**
      * The mirror's own aggregate counter, brought up to date with the mounts.
@@ -314,9 +330,12 @@ public final class RustStorageIndex {
             index.ensureKeyCapacity(interner.size());
         }
 
-        // Long-lived cells are re-read in the same pass, but `push` compares the storage version it
-        // last mirrored against the current one, so a cell that several mutations touched during one
-        // tick is still only re-read once per sync.
+        // The per-cell version check always runs, because it is the only way to observe a mutation
+        // that happened to a mount outside the network's own insert/extract calls - which is exactly
+        // what a drive cell written by an IO port does. The check itself is one virtual call per
+        // cell; everything expensive happens behind it: a cell whose version did not move returns
+        // early in `push`, and when no cell moved the aggregate counter is not touched at all.
+        diag[2]++;
         for (var mounted : cells.values()) {
             if (!push(mounted)) {
                 return false;
@@ -330,9 +349,11 @@ public final class RustStorageIndex {
      *
      * @return false when the mirror cannot be used, in which case the caller falls back to Java.
      */
+
     private boolean updateMaintainedCounter(long revisionBefore) {
         var revisionAfter = index.deltaRevision();
         if (maintainedCounter == null || maintainedRevision != revisionBefore) {
+            diag[0]++;
             // No usable baseline: read the whole aggregate once and adopt the counter.
             maintainedCounter = toCounter(index.available());
             maintainedRevision = index.deltaRevision();
@@ -343,11 +364,13 @@ public final class RustStorageIndex {
         }
         var changes = index.deltasSince(revisionBefore);
         if (changes == null) {
+            diag[0]++;
             // The change log no longer covers the gap, so rebuild instead of guessing.
             maintainedCounter = toCounter(index.available());
             maintainedRevision = index.deltaRevision();
             return true;
         }
+        diag[1]++;
         var keys = interner.keys();
         for (var change : changes.changes()) {
             var key = keys.get(change.keyId());
@@ -373,6 +396,7 @@ public final class RustStorageIndex {
         if (mounted.pushed && version == mounted.version) {
             return true;
         }
+        diag[3]++;
         mounted.version = version;
 
         var contents = mounted.storage.getAvailableStacks();
