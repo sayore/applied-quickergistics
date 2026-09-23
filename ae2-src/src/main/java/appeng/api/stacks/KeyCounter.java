@@ -46,10 +46,23 @@ import appeng.api.config.FuzzyMode;
 public final class KeyCounter implements Iterable<Object2LongMap.Entry<AEKey>> {
     // First map contains a mapping from AEKey#primaryKey
     private final Reference2ObjectMap<Object, VariantCounter> lists = new Reference2ObjectOpenHashMap<>();
+    /**
+     * Set once a fuzzy lookup has been requested on this counter.
+     * <p>
+     * A {@link VariantCounter.FuzzyVariantMap} indexes its keys in an AVL tree, which makes every
+     * insertion O(log n) instead of amortised O(1). The fuzzy index is only needed by the few callers
+     * that actually search by durability, but indexing by key cannot be switched to it later without
+     * rebuilding the tree. Deferring that switch until a fuzzy search is asked for therefore keeps
+     * the common counting path cheap while still guaranteeing that a fuzzy search is exact.
+     */
+    private boolean fuzzyLookupRequested;
 
     public Collection<Object2LongMap.Entry<AEKey>> findFuzzy(AEKey key, FuzzyMode fuzzy) {
         Objects.requireNonNull(key, "key");
-        var subIndex = getSubIndexOrNull(key);
+        // From here on, the entries of every fuzzy-capable key are indexed for range search, so a
+        // second fuzzy lookup on this counter does not have to walk the variants.
+        this.fuzzyLookupRequested = true;
+        var subIndex = getSubIndex(key);
         return subIndex == null ? List.of() : subIndex.findFuzzy(key, fuzzy);
     }
 
@@ -167,11 +180,21 @@ public final class KeyCounter implements Iterable<Object2LongMap.Entry<AEKey>> {
 
     private VariantCounter getSubIndex(AEKey key) {
         // We check before the call to computeIfAbsent, otherwise we'd need a capturing lambda.
-        if (key.getFuzzySearchMaxValue() > 0) {
-            return lists.computeIfAbsent(key.getPrimaryKey(), k -> new VariantCounter.FuzzyVariantMap());
-        } else {
-            return lists.computeIfAbsent(key.getPrimaryKey(), k -> new VariantCounter.UnorderedVariantMap());
+        if (fuzzyLookupRequested && key.getFuzzySearchMaxValue() > 0) {
+            var existing = lists.get(key.getPrimaryKey());
+            if (existing instanceof VariantCounter.FuzzyVariantMap) {
+                return existing;
+            }
+            // The first fuzzy lookup has to convert whatever was tallied so far. This happens at
+            // most once per primary key per counter, and only for callers that really search.
+            var fuzzy = new VariantCounter.FuzzyVariantMap();
+            if (existing != null) {
+                fuzzy.addAll(existing);
+            }
+            lists.put(key.getPrimaryKey(), fuzzy);
+            return fuzzy;
         }
+        return lists.computeIfAbsent(key.getPrimaryKey(), k -> new VariantCounter.UnorderedVariantMap());
     }
 
     @Nullable
