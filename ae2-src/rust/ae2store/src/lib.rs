@@ -367,10 +367,19 @@ impl Available {
 /// `seen` holds the ids that currently have a non-zero value, which is precisely what a query
 /// result consists of, so resetting the buffer after a query is proportional to the result size
 /// instead of to the size of the key space.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct DenseAccumulator {
     values: Vec<i64>,
     seen: Vec<u32>,
+    /// Highest id that may be accumulated. Anything above it is not a key of this index, so looking
+    /// it up would be a caller error rather than a query.
+    max_id: usize,
+}
+
+impl Default for DenseAccumulator {
+    fn default() -> Self {
+        Self { values: Vec::new(), seen: Vec::new(), max_id: 0 }
+    }
 }
 
 impl DenseAccumulator {
@@ -378,6 +387,7 @@ impl DenseAccumulator {
         if self.values.len() < key_capacity {
             self.values.resize(key_capacity, 0);
         }
+        self.max_id = key_capacity;
         for &id in &self.seen {
             self.values[id as usize] = 0;
         }
@@ -390,8 +400,11 @@ impl DenseAccumulator {
             return;
         }
         let idx = id as usize;
-        if self.values.len() <= idx {
-            self.values.resize(idx + 1, 0);
+        // A filtered query takes its ids from the caller, so an id outside this index's key space has
+        // to be ignored rather than sized up to. Resizing to it asked for an allocation proportional
+        // to the id: one junk id of 2^32-1 is tens of gigabytes and takes the JVM down.
+        if idx >= self.max_id {
+            return;
         }
         if self.values[idx] == 0 {
             self.seen.push(id);
@@ -1402,6 +1415,30 @@ mod tests {
         assert_eq!(net.total_amount(), 12);
         assert_eq!(net.cell_count(), 2);
         assert_ne!(net.slot(b), net.slot(c));
+    }
+
+    /// A filtered query takes its ids from the caller. An id outside the index's key space must be
+    /// ignored, not sized up to: the accumulator used to resize to the id, so a single junk id of
+    /// 2^32-1 asked for tens of gigabytes and took the JVM down.
+    #[test]
+    fn filtered_query_ignores_ids_outside_the_key_space() {
+        let mut net = idx();
+        let a = net.add_cell(8, 0);
+        net.push_cell(a, 8, &[(1, 10), (2, 20)]);
+
+        let avail = net.available(Some(&[1, u32::MAX]));
+        assert_eq!(avail.ids, vec![1]);
+        assert_eq!(avail.amounts, vec![10]);
+
+        // The same for a filter that is entirely outside the key space.
+        let none = net.available(Some(&[u32::MAX, u32::MAX - 1]));
+        assert!(none.ids.is_empty());
+        assert!(none.amounts.is_empty());
+
+        // And the caller's ids are deduplicated, so a repeated key is not counted twice.
+        let repeated = net.available(Some(&[2, 2, 2]));
+        assert_eq!(repeated.ids, vec![2]);
+        assert_eq!(repeated.amounts, vec![20]);
     }
 
     #[test]
