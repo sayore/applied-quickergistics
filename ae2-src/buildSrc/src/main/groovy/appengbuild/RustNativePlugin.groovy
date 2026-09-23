@@ -100,28 +100,8 @@ class RustNativePlugin implements Plugin<Project> {
                 }
             }
         }
-
-        // Keep the native sources visible to IDEs by registering them with the main source set.
-        project.extensions.configure(SourceSetContainer) { sourceSets ->
-            sourceSets.named("main") {
-                resources {
-                    srcDir rustDir
-                    include "ae2store/src/**"
-                    include "ae2store-jni/src/**"
-                    include "Cargo.toml"
-                    include "*/Cargo.toml"
-                }
-            }
-        }
     }
 
-    /**
-     * Resolves the cargo executable.
-     *
-     * Only the filesystem is inspected: starting a process at configuration time is incompatible with
-     * Gradle's configuration cache. If the file exists but cannot actually run, {@code cargoBuild}
-     * fails with cargo's own error message, which is more useful than a generic "toolchain missing".
-     */
     private static String findCargo() {
         var candidates = new ArrayList<String>()
         var path = System.getenv("PATH")
