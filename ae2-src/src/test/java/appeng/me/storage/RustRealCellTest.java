@@ -60,6 +60,8 @@ class RustRealCellTest {
     private final BaseActionSource src = new BaseActionSource();
 
     RustRealCellTest(MinecraftServer server) {
+        // The mirror is opt-in; these tests exist to exercise it.
+        System.setProperty(RustStorageIndex.ENABLED_PROPERTY, "true");
     }
 
     private static AEItemKey key(ItemStack stack) {

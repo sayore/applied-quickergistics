@@ -368,6 +368,23 @@ pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_deltaRevi
     }
 }
 
+/// Diagnostic: `[realPushes, totalPushes]`.
+#[no_mangle]
+pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_pushStats(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jlongArray {
+    let result: Vec<i64> = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let (real, total) = h.index.push_stats();
+            vec![real as i64, total as i64]
+        }
+        None => vec![0; 2],
+    };
+    long_array(&mut env, &result)
+}
+
 #[no_mangle]
 pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_stats(
     mut env: JNIEnv,

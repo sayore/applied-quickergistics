@@ -228,7 +228,7 @@ public class NetworkStorage implements MEStorage {
         // original implementation below runs unchanged.
         var index = this.nativeIndex;
         if (index != null) {
-            var accelerated = index.getAvailableStacks();
+            var accelerated = index.getSharedAvailableStacks();
             if (accelerated != null) {
                 // `out` may already have been cleared via KeyCounter#clear, which only clears the
                 // inner variant counters and keeps the primary-key entries. Setting absolute amounts

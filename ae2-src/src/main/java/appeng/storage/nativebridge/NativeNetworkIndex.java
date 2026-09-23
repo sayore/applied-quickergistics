@@ -212,6 +212,14 @@ public final class NativeNetworkIndex implements AutoCloseable {
     }
 
     /**
+     * @return {@code [realPushes, totalPushes]}. Diagnostic only.
+     */
+    public long[] pushStats() {
+        requireOpen();
+        return NativeBindings.pushStats(handle);
+    }
+
+    /**
      * @return the revision the network totals are currently at.
      */
     public long deltaRevision() {

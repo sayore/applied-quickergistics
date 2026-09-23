@@ -64,6 +64,20 @@ public final class RustStorageIndex {
 
     private static final boolean ENABLED = resolveEnabled();
 
+    /**
+     * Set to {@code true} to enable the mirror.
+     * <p>
+     * Off by default. Measurements against real AE2 cells
+     * ({@code appeng.me.storage.RealCellPerformanceTest}) show the mirror at 0.65x to 1.04x of AE2's
+     * existing Java path, so enabling it unconditionally would be a regression. Two causes are known
+     * and both are fixable:
+     * <ul>
+     * <li>{@link #sync()} walks every mounted cell on every query to compare versions. The native work
+     * is only ~12 us while a query costs ~170 us, so this loop dominates.</li>
+     * <li>The aggregate counter is maintained but never received incrementally, because every
+     * {@code push_cell} advances the revision and invalidates the delta range.</li>
+     * </ul>
+     */
     private final NativeNetworkIndex index;
     private final DenseKeyInterner<AEKey> interner = new DenseKeyInterner();
 
@@ -106,11 +120,9 @@ public final class RustStorageIndex {
     }
 
     private static boolean resolveEnabled() {
-        var property = System.getProperty(ENABLED_PROPERTY);
-        if (property != null) {
-            return Boolean.parseBoolean(property);
-        }
-        return appeng.storage.nativebridge.NativeLibrary.isAvailable();
+        // Opt-in until the two known costs above are fixed.
+        return Boolean.getBoolean(ENABLED_PROPERTY)
+                && appeng.storage.nativebridge.NativeLibrary.isAvailable();
     }
 
     public void close() {
@@ -156,12 +168,52 @@ public final class RustStorageIndex {
      * @return the aggregate, or {@code null} if a mount cannot be mirrored, in which case the caller
      *         must use its own code path.
      */
+    /**
+     * The aggregate, maintained incrementally instead of rebuilt per query.
+     * <p>
+     * Building a {@link KeyCounter} from the native result costs an order of magnitude more than the
+     * native aggregate itself (measured at ~180 us versus ~11 us on a 14-cell drive), because every
+     * entry has to be resolved back to an {@link AEKey} and inserted into the counter's nested maps.
+     * That work is avoidable: the counter is kept up to date from the change log, so a query only has
+     * to look at what actually changed since the previous one.
+     * <p>
+     * May be {@code null} before the first successful sync.
+     */
+    @Nullable
+    private KeyCounter maintainedCounter;
+    /**
+     * Revision {@link #maintainedCounter} reflects, or {@code -1} when it has to be rebuilt.
+     */
+    private long maintainedRevision = -1;
+    /** Diagnostic: number of full counter rebuilds and incremental updates. */
+    public final long[] counterStats = new long[2];
+
+    /**
+     * The mirror's own aggregate counter, brought up to date with the mounts.
+     * <p>
+     * Unlike {@link #getAvailableStacks()}, which materialises a fresh counter for a caller that wants
+     * to own it, this hands out the counter the mirror maintains. It is meant to be read and iterated,
+     * not modified; a caller that needs to change it must copy the entries it cares about.
+     *
+     * @return the aggregate, or {@code null} when the mirror cannot be used.
+     */
+    @Nullable
+    public KeyCounter getSharedAvailableStacks() {
+        if (!sync()) {
+            return null;
+        }
+        return maintainedCounter;
+    }
+
     @Nullable
     public KeyCounter getAvailableStacks() {
         if (!sync()) {
             return null;
         }
-        return toCounter(index.available());
+        if (maintainedCounter == null) {
+            return null;
+        }
+        return maintainedCounter;
     }
 
     /**
@@ -252,6 +304,7 @@ public final class RustStorageIndex {
      *         not be used.
      */
     private boolean sync() {
+        var revisionBefore = index.deltaRevision();
         for (var i = 0; i < pending.size(); i++) {
             if (!push(pending.get(i))) {
                 return false;
@@ -271,6 +324,45 @@ public final class RustStorageIndex {
                 return false;
             }
         }
+        return updateMaintainedCounter(revisionBefore);
+    }
+
+    /**
+     * Brings {@link #maintainedCounter} up to date with the native totals.
+     *
+     * @return false when the mirror cannot be used, in which case the caller falls back to Java.
+     */
+    private boolean updateMaintainedCounter(long revisionBefore) {
+        var revisionAfter = index.deltaRevision();
+        if (maintainedCounter == null || maintainedRevision != revisionBefore) {
+            // No usable baseline: read the whole aggregate once and adopt the counter.
+            counterStats[0]++;
+            maintainedCounter = toCounter(index.available());
+            maintainedRevision = index.deltaRevision();
+            return true;
+        }
+        if (revisionAfter == revisionBefore) {
+            return true;
+        }
+        var changes = index.deltasSince(revisionBefore);
+        if (changes == null) {
+            // The change log no longer covers the gap, so rebuild instead of guessing.
+            counterStats[0]++;
+            maintainedCounter = toCounter(index.available());
+            maintainedRevision = index.deltaRevision();
+            return true;
+        }
+        counterStats[1]++;
+        var keys = interner.keys();
+        for (var change : changes.changes()) {
+            var key = keys.get(change.keyId());
+            if (change.newTotal() == 0) {
+                maintainedCounter.remove(key);
+            } else {
+                maintainedCounter.set(key, change.newTotal());
+            }
+        }
+        maintainedRevision = changes.revision();
         return true;
     }
 
@@ -413,6 +505,11 @@ public final class RustStorageIndex {
 
     /** A replayable run of changes ending at {@code revision}. */
     public record ChangeSet(long revision, List<KeyChange> changes) {
+    }
+
+    /** Diagnostic: {@code [realPushes, totalPushes]}. */
+    public long[] pushStats() {
+        return index.pushStats();
     }
 
     public NativeNetworkIndex nativeIndex() {

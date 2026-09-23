@@ -446,6 +446,9 @@ pub struct NetworkIndex {
     delta_log: VecDeque<TotalChange>,
     /// Revision the network totals are at. Every retained change occupies exactly one revision.
     delta_revision: u64,
+    /// Diagnostic: `push_cell` calls that actually changed something, and total calls.
+    push_real: u64,
+    push_total: u64,
     /// Reverse index: for every key id, the ascending-priority list of cell slots that hold it.
     ///
     /// Key-centric operations are otherwise O(cells) because only the cell knows about the key
@@ -608,6 +611,7 @@ impl NetworkIndex {
     ///
     /// This is the incremental sync point: Java only calls it for cells whose contents changed.
     pub fn push_cell(&mut self, cell_id: u32, key_capacity: usize, entries: &[(u32, i64)]) {
+        self.push_total += 1;
         // A push whose content matches what is already stored must cost nothing. This happens in
         // practice: the caller re-reads a cell whose version changed but whose contents the caller
         // then reports unchanged, and the mirror would otherwise subtract and re-add every key,
@@ -624,6 +628,7 @@ impl NetworkIndex {
                 return;
             }
         }
+        self.push_real += 1;
         self.ensure_capacity(key_capacity);
         let Some(slot) = self.slot(cell_id) else {
             return;
@@ -905,6 +910,12 @@ impl NetworkIndex {
     #[inline]
     pub fn pending_delta_count(&self) -> usize {
         self.delta_log.len()
+    }
+
+    /// Diagnostic: `(real pushes, total pushes)`.
+    #[inline]
+    pub fn push_stats(&self) -> (u64, u64) {
+        (self.push_real, self.push_total)
     }
 
     /// O(1) network-wide amount for a key.
