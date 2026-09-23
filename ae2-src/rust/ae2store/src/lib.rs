@@ -887,15 +887,18 @@ impl NetworkIndex {
         if since_revision == self.delta_revision {
             return Some((self.delta_revision, Vec::new()));
         }
-        let changes: Vec<TotalChange> = self
+        // Entries are appended in revision order, so the first one a consumer still needs can be
+        // found by binary search instead of scanning the whole retained log. Without this, every
+        // call walked every entry ever retained, which made the consumer's cost grow with the log
+        // rather than with the change.
+        let start = self
             .delta_log
-            .iter()
-            .filter(|change| change.revision > since_revision)
-            .copied()
-            .collect();
+            .partition_point(|change| change.revision <= since_revision);
         // The range is complete only if it starts at the very next revision.
-        match changes.first() {
-            Some(first) if first.revision == since_revision + 1 => Some((self.delta_revision, changes)),
+        match self.delta_log.get(start) {
+            Some(first) if first.revision == since_revision + 1 => {
+                Some((self.delta_revision, self.delta_log.iter().skip(start).copied().collect()))
+            }
             _ => None,
         }
     }
