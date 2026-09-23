@@ -378,7 +378,11 @@ struct DenseAccumulator {
 
 impl Default for DenseAccumulator {
     fn default() -> Self {
-        Self { values: Vec::new(), seen: Vec::new(), max_id: 0 }
+        Self {
+            values: Vec::new(),
+            seen: Vec::new(),
+            max_id: 0,
+        }
     }
 }
 
@@ -992,8 +996,18 @@ impl NetworkIndex {
             return;
         }
         let all = std::mem::take(&mut self.cells);
+        // Slots are about to be renumbered, so a removed id must not be left pointing at whatever cell
+        // ends up in its old slot. Collect those ids before the cells are consumed.
+        let retired: Vec<u32> = all
+            .iter()
+            .filter(|cell| !cell.alive)
+            .map(|c| c.identity)
+            .collect();
         let mut promoted: Vec<Cell> = all.into_iter().filter(|cell| cell.alive).collect();
         promoted.sort_by_key(|cell| cell.priority);
+        for id in retired {
+            self.slot_of[id as usize] = NO_SLOT;
+        }
         for (slot, cell) in promoted.iter().enumerate() {
             self.slot_of[cell.identity as usize] = slot as u32;
         }
@@ -1281,7 +1295,12 @@ mod tests {
             let cell = net.add_cell(KEY_CAPACITY, priority);
             net.set_cell_max_per_key(cell, CAP);
             cell_ids.push(cell);
-            model.push(Model { priority, order: i, amounts: vec![0; KEYS as usize], cap: CAP });
+            model.push(Model {
+                priority,
+                order: i,
+                amounts: vec![0; KEYS as usize],
+                cap: CAP,
+            });
         }
 
         // Naive extract: ascending priority, then insertion order.
@@ -1402,12 +1421,19 @@ mod tests {
         let b = net.add_cell(8, 0);
         net.push_cell(b, 8, &[(2, 7)]);
         assert_eq!(net.total_of(2), 7);
-        assert_eq!(net.total_of(1), 0, "the new cell must not inherit the old one's keys");
+        assert_eq!(
+            net.total_of(1),
+            0,
+            "the new cell must not inherit the old one's keys"
+        );
         assert_eq!(net.total_amount(), 7);
         assert_eq!(net.cell_count(), 1);
 
         // The old id must be gone, not pointing at the reused slot.
-        assert!(net.slot(a).is_none(), "removed cell id {a} must not resolve to a slot");
+        assert!(
+            net.slot(a).is_none(),
+            "removed cell id {a} must not resolve to a slot"
+        );
 
         // And a third cell must not collide with either.
         let c = net.add_cell(8, 0);
@@ -1415,6 +1441,54 @@ mod tests {
         assert_eq!(net.total_amount(), 12);
         assert_eq!(net.cell_count(), 2);
         assert_ne!(net.slot(b), net.slot(c));
+    }
+
+    /// Reordering permutes the cell array, so a removed id must not be left pointing at whichever cell
+    /// ends up in its old slot. That happened whenever a dead cell's slot index was reused by a live
+    /// cell, which made the mirror read a drive that no longer exists.
+    #[test]
+    fn removed_ids_stay_retired_across_reorders() {
+        let mut net = idx();
+        let a = net.add_cell(8, 0);
+        net.push_cell(a, 8, &[(1, 10)]);
+        let b = net.add_cell(8, 5);
+        net.push_cell(b, 8, &[(2, 20)]);
+
+        // Remove a, then mount enough new cells to exhaust the free slots so a reorder has to
+        // renumber them, and finally force a reorder by changing a priority.
+        net.remove_cell(a);
+        let c = net.add_cell(8, 5);
+        net.push_cell(c, 8, &[(3, 30)]);
+        let d = net.add_cell(8, -5);
+        net.push_cell(d, 8, &[(4, 40)]);
+        net.set_cell_priority(d, -2);
+        net.set_cell_priority(c, 1);
+
+        assert!(net.slot(a).is_none(), "removed id {a} must stay retired");
+        assert_eq!(net.total_of(1), 0, "the removed cell's key must be gone");
+        assert_eq!(net.total_of(2), 20);
+        assert_eq!(net.total_of(3), 30);
+        assert_eq!(net.total_amount(), 90);
+        assert_eq!(net.total_of(4), 40);
+
+        // The live cells are still reachable and correct.
+        assert!(net.slot(b).is_some());
+        assert!(net.slot(c).is_some());
+        assert_ne!(net.slot(b), net.slot(c));
+
+        // Removing a cell and then reordering must retire it as well.
+        net.remove_cell(b);
+        net.set_cell_priority(c, 2);
+        assert!(net.slot(b).is_none(), "removed id {b} must stay retired");
+        assert!(net.slot(a).is_none());
+        assert_eq!(net.total_amount(), 70);
+        assert_eq!(net.cell_count(), 2);
+
+        net.remove_cell(d);
+        net.set_cell_priority(c, 3);
+        assert!(net.slot(d).is_none());
+        assert_eq!(net.total_amount(), 30);
+        assert_eq!(net.cell_count(), 1);
     }
 
     /// A filtered query takes its ids from the caller. An id outside the index's key space must be

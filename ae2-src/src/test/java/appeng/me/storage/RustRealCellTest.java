@@ -413,6 +413,94 @@ class RustRealCellTest {
         assertThat(network.extract(stone, 1, Actionable.MODULATE, src)).isZero();
     }
 
+    /**
+     * A larger network than the other tests build, mutated every round, with the mirror compared against Java each
+     * time. This is the shape of a base that is actually being used: many cells, many distinct keys, several mutated
+     * per tick, and the delta stream patching the counter in between.
+     */
+    @Test
+    void manyCellsStayCorrectWhileSeveralChangeEveryRound() {
+        var pool = new ArrayList<List<ItemStack>>();
+        for (var item : net.minecraft.core.registries.BuiltInRegistries.ITEM) {
+            var stack = new ItemStack(item);
+            if (!stack.isEmpty()) {
+                pool.add(List.of(stack));
+            }
+            if (pool.size() >= 1600) {
+                break;
+            }
+        }
+        assertThat(pool.size()).as("the registry must offer enough item types").isGreaterThan(1000);
+
+        var rnd = new java.util.Random(0xBADC0DE);
+        // Four keys per cell, so a cell still has room to grow during the run.
+        var cellCount = 30;
+        var inventories = new ArrayList<BasicCellInventory>();
+        var mounts = new ArrayList<MEStorage>();
+        var network = new NetworkStorage();
+        for (var c = 0; c < cellCount; c++) {
+            var stacks = new ArrayList<ItemStack>();
+            for (var k = 0; k < 4; k++) {
+                stacks.add(pool.get(rnd.nextInt(pool.size())).get(0).copyWithCount(20 + rnd.nextInt(40)));
+            }
+            var mount = driveCell(stacks);
+            mounts.add(mount);
+            inventories.add((BasicCellInventory) ((appeng.api.storage.cells.StorageCell) mount.getDelegate()));
+            network.mount(rnd.nextInt(7) - 3, mount);
+        }
+
+        var revision = network.revision();
+        var replayed = new KeyCounter();
+        network.getAvailableStacks(replayed);
+
+        for (var round = 0; round < 300; round++) {
+            // Several cells change per round, which is what a busy network looks like.
+            for (var mutation = 0; mutation < 3; mutation++) {
+                var inventory = inventories.get(rnd.nextInt(inventories.size()));
+                var key = AEItemKey.of(pool.get(rnd.nextInt(pool.size())).get(0));
+                var amount = rnd.nextInt(15);
+                if (rnd.nextBoolean()) {
+                    inventory.insert(key, amount, Actionable.MODULATE, src);
+                } else {
+                    inventory.extract(key, amount, Actionable.MODULATE, src);
+                }
+            }
+
+            assertMatchesReference(network, mounts, round);
+
+            var deltas = network.deltasSince(revision);
+            if (deltas == null) {
+                replayed.clear();
+                network.getAvailableStacks(replayed);
+                revision = network.revision();
+            } else {
+                for (var change : deltas.changes()) {
+                    if (change.newTotal() == 0) {
+                        replayed.remove(change.key());
+                    } else {
+                        replayed.set(change.key(), change.newTotal());
+                    }
+                }
+                revision = deltas.revision();
+            }
+            var fresh = new KeyCounter();
+            network.getAvailableStacks(fresh);
+            assertSameContents(snapshot(replayed), snapshot(fresh));
+        }
+    }
+
+    /** Compares the network's aggregate against a plain Java merge of the same mounts. */
+    private static void assertMatchesReference(NetworkStorage network, List<MEStorage> mounts, int round) {
+        var actual = new KeyCounter();
+        network.getAvailableStacks(actual);
+        var expected = javaAggregate(mounts);
+        try {
+            assertSameContents(snapshot(actual), expected);
+        } catch (AssertionError e) {
+            throw new AssertionError("round " + round + ": " + e.getMessage(), e);
+        }
+    }
+
     private static RustStorageIndex mirrorOf(NetworkStorage network) {
         try {
             var field = NetworkStorage.class.getDeclaredField("nativeIndex");

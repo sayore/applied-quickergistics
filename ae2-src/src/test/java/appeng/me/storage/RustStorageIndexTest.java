@@ -408,6 +408,49 @@ class RustStorageIndexTest {
     }
 
     /**
+     * Storages are remounted constantly - an interface or drive re-mounts what it provides whenever its node changes
+     * grid, and each remount goes through unmount then mount. The mirror recycles the cell id when it does, so the
+     * counts and contents have to survive that cycle.
+     */
+    @Test
+    void remountingStoragesRepeatedlyStaysConsistent() {
+        var keys = keys(6);
+        var first = new FakeStorage();
+        var second = new FakeStorage();
+        first.set(keys.get(0), 10);
+        second.set(keys.get(1), 20);
+
+        var network = new NetworkStorage();
+        for (var cycle = 0; cycle < 50; cycle++) {
+            network.mount(cycle % 3, first);
+            network.mount(-(cycle % 3), second);
+            assertMatchesReference(network, List.of(first, second));
+
+            network.unmount(first);
+            assertMatchesReference(network, List.of(second));
+
+            network.unmount(second);
+            assertMatchesReference(network, List.of());
+
+            // Contents change while nothing is mounted, which the next mount has to pick up.
+            first.set(keys.get(0), cycle);
+            second.set(keys.get(2), cycle + 100);
+        }
+
+        // And an unmirrored storage remounted after a mirrored one must not inherit its cell.
+        var unversioned = new UnversionedStorage();
+        unversioned.contents.put(keys.get(3), 7);
+        network.mount(0, first);
+        network.mount(1, unversioned);
+        assertMatchesReference(network, List.of(first, unversioned));
+        assertThat(network.getUncoveredMounts()).containsExactly(unversioned);
+
+        network.unmount(unversioned);
+        assertMatchesReference(network, List.of(first));
+        assertThat(network.getUncoveredMounts()).isEmpty();
+    }
+
+    /**
      * Fuzzes the partial-coverage merge: a changing mix of mirrored and unmirrored mounts, mutated behind the network's
      * back, mounted and unmounted while the network is queried.
      * <p>
