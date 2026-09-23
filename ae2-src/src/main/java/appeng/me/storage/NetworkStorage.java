@@ -230,6 +230,24 @@ public class NetworkStorage implements MEStorage {
         if (index != null) {
             var accelerated = index.getSharedAvailableStacks();
             if (accelerated != null) {
+                // Whatever the mirror could not reproduce is read here in Java and added on top, so
+                // one such mount costs only itself instead of disabling the mirror for the network.
+                var uncovered = index.getUncoveredMounts();
+                if (!uncovered.isEmpty()) {
+                    mountsInUse = true;
+                    try {
+                        for (var invList : this.priorityInventory.values()) {
+                            for (var inv : invList) {
+                                if (uncovered.contains(inv)) {
+                                    inv.getAvailableStacks(accelerated);
+                                }
+                            }
+                        }
+                    } finally {
+                        mountsInUse = false;
+                    }
+                }
+
                 // A caller that passes back the exact counter this method handed out last time is
                 // already up to date, so there is nothing to copy. StorageService does this every
                 // tick; copying instead cost ~232 us for 1827 stored types, while the maintained

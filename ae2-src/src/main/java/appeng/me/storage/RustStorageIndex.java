@@ -20,6 +20,7 @@ package appeng.me.storage;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -197,6 +198,9 @@ public final class RustStorageIndex {
      * Diagnostics: {@code [rebuilds, incrementalUpdates, syncWalks, pushes]}.
      */
     public final long[] diag = new long[4];
+    /** Mounts the mirror cannot reproduce, so the caller has to read them in Java. */
+    private final Set<MEStorage> uncovered =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
     /**
      * Why a mount could not be mirrored.
@@ -380,9 +384,11 @@ public final class RustStorageIndex {
      */
     private boolean sync() {
         var revisionBefore = index.deltaRevision();
+        uncovered.clear();
         for (var i = 0; i < pending.size(); i++) {
-            if (!push(pending.get(i))) {
-                return false;
+            var m = pending.get(i);
+            if (!push(m)) {
+                uncovered.add(m.storage);
             }
         }
         if (!pending.isEmpty()) {
@@ -397,12 +403,28 @@ public final class RustStorageIndex {
         // cell; everything expensive happens behind it: a cell whose version did not move returns
         // early in `push`, and when no cell moved the aggregate counter is not touched at all.
         diag[2]++;
+        var covered = true;
         for (var mounted : cells.values()) {
             if (!push(mounted)) {
-                return false;
+                covered = false;
+                uncovered.add(mounted.storage);
             }
         }
-        return updateMaintainedCounter(revisionBefore);
+        if (covered) {
+            return updateMaintainedCounter(revisionBefore);
+        }
+        // The mirror's own aggregate has to stay the sum of the cells it could reproduce, so it is
+        // dropped rather than mixed with totals the caller then adds again in Java.
+        maintainedCounter = null;
+        maintainedRevision = -1;
+        return true;
+    }
+
+    /**
+     * Mounts the mirror could not reproduce for the current query. Only valid until the next query.
+     */
+    public Set<MEStorage> getUncoveredMounts() {
+        return uncovered;
     }
 
     /**

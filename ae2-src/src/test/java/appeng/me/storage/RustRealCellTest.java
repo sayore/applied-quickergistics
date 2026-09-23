@@ -86,36 +86,34 @@ class RustRealCellTest {
         return new DriveWatcher(inventory, () -> {
         });
     }
-
+    /**
+     * Aggregates a counter's non-zero contents by key.
+     * <p>
+     * {@code KeyCounter} stores amounts in reference-keyed maps, and {@code AEItemKey} instances are
+     * only canonical within one item registry. Comparing two counters by key identity is therefore
+     * unreliable in the test environment, which can end up with more than one {@code Item} instance
+     * for the same item, so the same logical item legitimately lands in two buckets. Aggregating by
+     * key equality compares what the counters actually report: the amounts per item.
+     */
     private static Map<AEKey, Long> snapshot(KeyCounter counter) {
-        var map = new IdentityHashMap<AEKey, Long>();
+        var map = new java.util.LinkedHashMap<AEKey, Long>();
         for (var entry : counter) {
-            map.put(entry.getKey(), entry.getLongValue());
+            var amount = entry.getLongValue();
+            if (amount != 0) {
+                map.merge(entry.getKey(), amount, Long::sum);
+            }
         }
         return map;
     }
 
     /**
-     * Entry-wise comparison of two identity-keyed maps.
+     * Compares two aggregates by key equality and primitive amount.
      * <p>
-     * {@code Map.equals} compares values with {@code equals}, which is wrong here twice over: the
-     * maps are identity maps, so keys are compared by reference, and the values are boxed longs whose
-     * equality would depend on identity below the cache range.
-     */
-    /**
-     * Entry-wise comparison.
-     * <p>
-     * {@code Map.equals} cannot be used here: both maps are identity maps, so keys are compared by
-     * reference, and the values are boxed longs whose identity below the cache range would decide the
-     * comparison. AssertJ's containment check has the same problem on the value side.
-     */
-    /**
-     * Entry-wise comparison. {@code Map.equals} cannot be used: both maps are identity maps, so keys
-     * are compared by reference, and AssertJ's containment check compares the boxed amounts, whose
-     * identity below the cache range would decide the result.
+     * Neither {@code Map.equals} nor AssertJ's containment check works here: the keys are identity
+     * compared, and the amounts are boxed longs.
      */
     private static void assertSameContents(Map<AEKey, Long> actual, Map<AEKey, Long> expected) {
-        assertThat(actual).hasSameSizeAs(expected);
+        assertThat(actual.size()).as("distinct items").isEqualTo(expected.size());
         for (var entry : expected.entrySet()) {
             var actualValue = actual.get(entry.getKey());
             assertThat(actualValue)
@@ -126,6 +124,7 @@ class RustRealCellTest {
                     .isEqualTo(entry.getValue().longValue());
         }
     }
+
 
     /** The aggregate the Java path produces for the given mounts. */
     private static Map<AEKey, Long> javaAggregate(List<MEStorage> mounts) {
@@ -246,6 +245,7 @@ class RustRealCellTest {
         // Force a sync so the mounts are classified.
         allMirrorable.getAvailableStacks(new KeyCounter());
         assertThat(mirror.describeCoverage()).isEqualTo("mirrored=1, excluded=0");
+        assertThat(mirror.getUncoveredMounts()).isEmpty();
 
         // A filtering handler is the storage-bus shape: the mirror cannot reproduce its filter, so it
         // has to be reported as excluded rather than silently over-reporting.
@@ -260,6 +260,49 @@ class RustRealCellTest {
         assertThat(filterMirror.describeCoverage())
                 .contains("excluded=1")
                 .contains("FILTERS_CONTENTS");
+        assertThat(filterMirror.getUncoveredMounts()).containsExactly(filtering);
+    }
+
+    /**
+     * The point of partial coverage: a mount the mirror cannot reproduce must cost only itself.
+     * <p>
+     * Before this, one such mount disabled the mirror for the whole network. The result has to stay
+     * exact either way, which is what this checks - a mixed network must read the same as if the
+     * mirror were not there at all, both before and after the covered cells change.
+     */
+    @Test
+    void mixedNetworkMatchesJavaAggregate() {
+        var coveredCell = driveCell(
+                List.of(new ItemStack(Items.STONE, 1000), new ItemStack(Items.DIRT, 400)));
+        var secondCovered = driveCell(List.of(new ItemStack(Items.IRON_INGOT, 77)));
+
+        // A storage-bus-shaped mount: it filters what it reports, so the mirror cannot reproduce it.
+        var busBacking = driveCell(
+                List.of(new ItemStack(Items.STONE, 5), new ItemStack(Items.GOLD_INGOT, 9)));
+        var bus = new appeng.me.storage.MEInventoryHandler(busBacking) {
+        };
+        bus.setExtractFiltering(false, true);
+
+        var network = new NetworkStorage();
+        network.mount(0, coveredCell);
+        network.mount(1, secondCovered);
+        network.mount(2, bus);
+
+        var mirror = mirrorOf(network);
+        assertThat(mirror).isNotNull();
+
+        var expected = javaAggregate(List.of(coveredCell, secondCovered, bus));
+        var actual = new KeyCounter();
+        network.getAvailableStacks(actual);
+        assertSameContents(snapshot(actual), expected);
+
+        // And again once a covered cell changes, which exercises the incremental path.
+        var cell = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) coveredCell.getDelegate());
+        cell.insert(AEItemKey.of(new ItemStack(Items.EMERALD)), 42, Actionable.MODULATE, src);
+        expected = javaAggregate(List.of(coveredCell, secondCovered, bus));
+        actual = new KeyCounter();
+        network.getAvailableStacks(actual);
+        assertSameContents(snapshot(actual), expected);
     }
 
     @Test
