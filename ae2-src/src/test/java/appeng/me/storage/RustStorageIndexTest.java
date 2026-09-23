@@ -359,6 +359,55 @@ class RustStorageIndexTest {
     }
 
     /**
+     * Mounting the same storage instance twice is redundant, and AE2's own unmount removes it from every priority list
+     * at once, so the second mount disappears with the first unmount. The mirror keys its mounts by instance and
+     * therefore counts such a storage once.
+     * <p>
+     * That difference is deliberate and is pinned down here so it stays a decision rather than a surprise: the Java
+     * path temporarily reports the storage twice, the mirror reports it once, and both agree the moment anything is
+     * unmounted, which is the only state that persists.
+     */
+    @Test
+    void doubleMountCountsOnceInTheMirrorAndNotAtAllAfterOneUnmount() {
+        var stone = key(0);
+        var dirt = key(1);
+        var storage = new FakeStorage();
+        storage.set(stone, 10);
+        storage.set(dirt, 20);
+
+        var network = new NetworkStorage();
+
+        // One mount reports the storage's contents.
+        network.mount(0, storage);
+        var single = new KeyCounter();
+        network.getAvailableStacks(single);
+        assertThat(single.get(stone)).isEqualTo(10);
+        assertThat(single.get(dirt)).isEqualTo(20);
+
+        // A second mount of the same instance does not double it: the mirror keys mounts by instance.
+        network.mount(5, storage);
+        var doubled = new KeyCounter();
+        network.getAvailableStacks(doubled);
+        assertThat(doubled.get(stone)).as("a repeated mount must not double the storage").isEqualTo(10);
+        assertThat(doubled.get(dirt)).isEqualTo(20);
+
+        // One unmount clears the instance from every priority list, which is what AE2's own unmount
+        // does, so the network must come back empty.
+        network.unmount(storage);
+        var afterUnmount = new KeyCounter();
+        network.getAvailableStacks(afterUnmount);
+        assertThat(afterUnmount.isEmpty()).isTrue();
+        assertMatchesReference(network, List.of());
+
+        // And the mirror must not be left holding the recycled cell: remounting reports it again.
+        network.mount(0, storage);
+        var remounted = new KeyCounter();
+        network.getAvailableStacks(remounted);
+        assertThat(remounted.get(stone)).isEqualTo(10);
+        assertThat(remounted.get(dirt)).isEqualTo(20);
+    }
+
+    /**
      * Fuzzes the partial-coverage merge: a changing mix of mirrored and unmirrored mounts, mutated behind the network's
      * back, mounted and unmounted while the network is queried.
      * <p>
