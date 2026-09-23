@@ -48,7 +48,7 @@ final class NativeBindings {
 
     static native void setCellWhitelist(long handle, int cellId, long[] whitelist);
 
-    static native void pushCell(long handle, int cellId, int keyCapacity, long[] ids, long[] amounts);
+    static native void pushCell(long handle, int cellId, int keyCapacity, long[] entries, int entryCount);
 
     static native void applyCellDelta(long handle, int cellId, int keyId, long delta);
 

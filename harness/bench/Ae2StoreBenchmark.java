@@ -229,15 +229,13 @@ public final class Ae2StoreBenchmark {
                     entries.add(new long[] { keyIds[k], amount });
                 }
                 if (nativeIndex != null) {
-                    nativeIndex.ensureKeyCapacity(interner.size());
                     cellIds[c] = nativeIndex.addCell(interner.size(), priority);
-                    var ids = new long[entries.size()];
-                    var amounts = new long[entries.size()];
+                    var packed = new long[entries.size() * 2];
                     for (var i = 0; i < entries.size(); i++) {
-                        ids[i] = entries.get(i)[0];
-                        amounts[i] = entries.get(i)[1];
+                        packed[i * 2] = entries.get(i)[0];
+                        packed[i * 2 + 1] = entries.get(i)[1];
                     }
-                    nativeIndex.pushCell(cellIds[c], interner.size(), ids, amounts);
+                    nativeIndex.pushCell(cellIds[c], interner.size(), packed, entries.size());
                 }
             }
         }

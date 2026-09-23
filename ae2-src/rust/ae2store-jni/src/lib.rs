@@ -64,27 +64,35 @@ fn read_longs(env: &mut JNIEnv, array: &JLongArray) -> Option<Vec<i64>> {
     Some(buf)
 }
 
-/// Reads the `(id, amount)` pairs of a cell, dropping non-positive amounts and sorting by id.
+/// Reads only the populated prefix of a reusable packed `(id, amount)` buffer.
 fn read_entries(
     env: &mut JNIEnv,
-    ids: &JLongArray,
-    amounts: &JLongArray,
+    packed: &JLongArray,
+    count: jint,
 ) -> Result<Vec<(u32, i64)>, String> {
-    let id_buf = read_longs(env, ids).ok_or_else(|| "ids array could not be read".to_string())?;
-    let amount_buf =
-        read_longs(env, amounts).ok_or_else(|| "amounts array could not be read".to_string())?;
-    if id_buf.len() != amount_buf.len() {
-        return Err(format!(
-            "ids and amounts must have the same length (got {} and {})",
-            id_buf.len(),
-            amount_buf.len()
-        ));
+    if count < 0 || packed.is_null() {
+        return Err("invalid packed cell entries".to_string());
     }
-    let mut entries = Vec::with_capacity(id_buf.len());
-    for i in 0..id_buf.len() {
-        let amount = amount_buf[i];
+    let len = env
+        .get_array_length(packed)
+        .map_err(|_| "packed entries length could not be read".to_string())? as usize;
+    let pair_count = count as usize;
+    let used = pair_count
+        .checked_mul(2)
+        .ok_or_else(|| "packed entry count overflow".to_string())?;
+    if used > len {
+        return Err(format!("packed entries need {used} longs, got {len}"));
+    }
+    let mut buffer = vec![0i64; used];
+    if used > 0 {
+        env.get_long_array_region(packed, 0, &mut buffer)
+            .map_err(|_| "packed entries could not be read".to_string())?;
+    }
+    let mut entries = Vec::with_capacity(pair_count);
+    for pair in buffer.chunks_exact(2) {
+        let amount = pair[1];
         if amount > 0 {
-            entries.push((id_buf[i] as u32, amount));
+            entries.push((pair[0] as u32, amount));
         }
     }
     entries.sort_unstable_by_key(|&(id, _)| id);
@@ -206,13 +214,13 @@ pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_pushCell(
     handle: jlong,
     cell_id: jint,
     key_capacity: jint,
-    ids: JLongArray,
-    amounts: JLongArray,
+    packed: JLongArray,
+    entry_count: jint,
 ) {
     let Some(h) = (unsafe { handle_ref(handle) }) else {
         return;
     };
-    match read_entries(&mut env, &ids, &amounts) {
+    match read_entries(&mut env, &packed, entry_count) {
         Ok(entries) => h
             .index
             .push_cell(cell_id as u32, key_capacity.max(0) as usize, &entries),

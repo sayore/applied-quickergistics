@@ -125,11 +125,15 @@ public final class NativeNetworkIndex implements AutoCloseable {
     }
 
     /**
-     * Replaces a cell's contents. Both arrays must have the same length and contain no zero amounts.
+     * Replaces a cell's contents from interleaved {@code [id, amount]} pairs. Only the first {@code entryCount} pairs
+     * are transferred; the caller may reuse a larger scratch array.
      */
-    public void pushCell(int cellId, int keyCapacity, long[] ids, long[] amounts) {
+    public void pushCell(int cellId, int keyCapacity, long[] entries, int entryCount) {
         requireOpen();
-        NativeBindings.pushCell(handle, cellId, keyCapacity, ids, amounts);
+        if (entryCount < 0 || entryCount > entries.length / 2) {
+            throw new IllegalArgumentException("entryCount exceeds the packed entries array");
+        }
+        NativeBindings.pushCell(handle, cellId, keyCapacity, entries, entryCount);
     }
 
     public void applyCellDelta(int cellId, int keyId, long delta) {
@@ -187,6 +191,39 @@ public final class NativeNetworkIndex implements AutoCloseable {
     public record ChangeSet(long revision, TotalChange[] changes) {
     }
 
+    /** A view of the flat native delta batch without allocating one Java object per change. */
+    public static final class DeltaBatch {
+        private final long[] flat;
+
+        private DeltaBatch(long[] flat) {
+            this.flat = flat;
+        }
+
+        public long revision() {
+            return flat[1];
+        }
+
+        public int size() {
+            return (flat.length - 2) / 4;
+        }
+
+        public int keyIdAt(int index) {
+            return (int) flat[2 + index * 4];
+        }
+
+        public long oldTotalAt(int index) {
+            return flat[3 + index * 4];
+        }
+
+        public long newTotalAt(int index) {
+            return flat[4 + index * 4];
+        }
+
+        public int cellIdAt(int index) {
+            return (int) flat[5 + index * 4];
+        }
+    }
+
     /**
      * Changes to network totals since {@code sinceRevision}.
      *
@@ -194,20 +231,32 @@ public final class NativeNetworkIndex implements AutoCloseable {
      *         aggregate instead.
      */
     @Nullable
-    public ChangeSet deltasSince(long sinceRevision) {
+    public DeltaBatch deltaBatchSince(long sinceRevision) {
         requireOpen();
         var flat = NativeBindings.deltasSince(handle, sinceRevision);
         if (flat.length < 2 || flat[0] == 0) {
             return null;
         }
-        var revision = flat[1];
-        var count = (flat.length - 2) / 4;
+        if ((flat.length - 2) % 4 != 0) {
+            throw new IllegalStateException("native delta batch has an invalid length");
+        }
+        return new DeltaBatch(flat);
+    }
+
+    /** Materializes changes for callers that need individual records. */
+    @Nullable
+    public ChangeSet deltasSince(long sinceRevision) {
+        var batch = deltaBatchSince(sinceRevision);
+        if (batch == null) {
+            return null;
+        }
+        var count = batch.size();
         var changes = new TotalChange[count];
         for (var i = 0; i < count; i++) {
-            var at = 2 + i * 4;
-            changes[i] = new TotalChange((int) flat[at], flat[at + 1], flat[at + 2], (int) flat[at + 3]);
+            changes[i] = new TotalChange(batch.keyIdAt(i), batch.oldTotalAt(i), batch.newTotalAt(i),
+                    batch.cellIdAt(i));
         }
-        return new ChangeSet(revision, changes);
+        return new ChangeSet(batch.revision(), changes);
     }
 
     /**

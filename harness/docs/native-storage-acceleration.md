@@ -18,8 +18,8 @@ is.
   "something changed, then query" tick shape and **~370-390× faster** when the aggregate is
   re-requested without a change, versus AE2's current implementation. See
   [benchmark-results.txt](benchmark-results.txt).
-* The mirror is **read-only and best-effort**: if the native library is missing, a mount cannot report
-  changes, or anything at all goes wrong, AE2's original Java code path runs unchanged.
+* The mirror is **read-only and best-effort**: if the native library is missing, AE2's Java path runs
+  unchanged. Mounts that cannot report changes are read in Java beside the mirrored aggregate.
 * This is, as far as the upstream research went, the first native/FFI attempt in AE2's history; there is
   no precedent in AE2, Refined Storage or comparable storage mods, so treat it as an experiment.
 
@@ -47,11 +47,26 @@ external inventory). Re-reading every cell every tick would cost more than the n
 `BasicCellInventory` implements the new `appeng.api.storage.VersionedStorage` interface and bumps a
 counter on every mutation. The mirror only re-reads cells whose counter changed.
 
-A mount that cannot report a version (for example a third-party `MEStorage`) makes the mirror
-unusable for that network, and the Java path is used. `MEInventoryHandler` wrappers are transparent as
-long as they neither filter the reported contents nor block extraction; otherwise they are rejected
-too. This is a deliberate correctness-over-speed trade: the mirror never has to replicate Java-side
-filtering.
+A mount that cannot report a version (for example a third-party `MEStorage`) is read in Java beside
+the mirrored mounts. `MEInventoryHandler` wrappers are transparent as long as they neither filter the
+reported contents nor block extraction; otherwise they are excluded from the mirror too. This is a
+deliberate correctness-over-speed trade: the mirror never guesses at Java-side filtering. A partial
+mirror cannot serve the delta stream, so its consumer does a full refresh.
+
+### JNI boundary and ownership
+
+Java remains the source of truth for `MEStorage`, `AEKey`, cell filters, priority dispatch and
+inventory side effects. Rust owns the dense cell index, per-cell diff, aggregate, postings and
+revisioned delta log. Moving the actual `MEStorage.insert` callback loop into Rust would require
+calling Java once per candidate cell and would not reduce the boundary crossings safely.
+
+The production mirror therefore crosses JNI once to check the revision of an idle network. When a
+versioned cell changes, Java sends its populated `(key id, amount)` pairs in one packed array; Rust
+reads only that prefix and performs the sort and diff. `pushCell` also grows the native key space, so
+there is no preceding capacity call. The native delta batch is read once for the maintained counter
+and, when the tick consumer asks for the same revision, reused for that call; it is then released.
+Only the final AE2-facing changes are materialized as `AEKey` records in Java. These changes reduce
+JNI calls and copies, but are not themselves an end-to-end MSPT claim.
 
 ## Measured results
 

@@ -103,10 +103,8 @@ public final class RustStorageIndex {
     private final Reference2ObjectMap<MEStorage, MountedCell> cells = new Reference2ObjectOpenHashMap<>();
     /** Mounts that have not been pushed to the native side yet. */
     private final List<MountedCell> pending = new ArrayList<>();
-    /** Scratch buffer for a cell's key ids, reused between pushes. */
-    private long[] idScratch = new long[64];
-    /** Scratch buffer for a cell's amounts, reused between pushes. */
-    private long[] amountScratch = new long[64];
+    /** Interleaved key-id/amount pairs, reused between cell pushes. */
+    private long[] entryScratch = new long[128];
     /**
      * Set by {@link #mount} and {@link #unmount}. A delta consumer cannot apply changes across a mount change, so it
      * has to do a full refresh instead.
@@ -265,6 +263,10 @@ public final class RustStorageIndex {
      * Revision {@link #maintainedCounter} reflects, or {@code -1} when it has to be rebuilt.
      */
     private long maintainedRevision = -1;
+    /** The batch just used to refresh the Java counter can also serve the tick consumer. */
+    @Nullable
+    private NativeNetworkIndex.DeltaBatch lastDeltaBatch;
+    private long lastDeltaFromRevision = -1;
     /**
      * Native revision at which every mount was last checked for changes, or {@code -1} to force a rescan. Nothing can
      * have changed while the revision is unchanged.
@@ -467,17 +469,22 @@ public final class RustStorageIndex {
      * @return false if any mounted storage cannot be mirrored, meaning the mirror is stale and must not be used.
      */
     private boolean sync() {
+        return sync(false);
+    }
+
+    private boolean sync(boolean retainDeltaBatch) {
+        lastDeltaBatch = null;
+        lastDeltaFromRevision = -1;
         var syncStart = System.nanoTime();
         try {
-            return syncInner();
+            return syncInner(retainDeltaBatch);
         } finally {
             syncNanos += System.nanoTime() - syncStart;
             syncCalls++;
         }
     }
 
-    private boolean syncInner() {
-        var revisionBefore = index.deltaRevision();
+    private boolean syncInner(boolean retainDeltaBatch) {
         // Rebuilt from scratch every sync. It used to be cleared and then only added to, so a mount that
         // could not be mirrored once stayed "uncovered" for the rest of the session - which kept the
         // network on the merged path and refused the delta stream forever.
@@ -491,8 +498,6 @@ public final class RustStorageIndex {
         }
         if (!pending.isEmpty()) {
             pending.clear();
-            // Interning may have added keys after the last push, so grow the native key space.
-            index.ensureKeyCapacity(interner.size());
         }
 
         // The per-cell version check always runs, because it is the only way to observe a mutation
@@ -532,7 +537,7 @@ public final class RustStorageIndex {
             // the change, so refresh it from the native totals.
             maintainedCounter = null;
         }
-        return updateMaintainedCounter(revisionBefore);
+        return updateMaintainedCounter(retainDeltaBatch);
     }
 
     /**
@@ -556,42 +561,51 @@ public final class RustStorageIndex {
      * @return false when the mirror cannot be used, in which case the caller falls back to Java.
      */
 
-    private boolean updateMaintainedCounter(long revisionBefore) {
+    private boolean updateMaintainedCounter(boolean retainDeltaBatch) {
         var revisionAfter = index.deltaRevision();
-        if (maintainedCounter == null || maintainedRevision != revisionBefore) {
+        if (maintainedCounter == null) {
+            lastDeltaBatch = null;
+            lastDeltaFromRevision = -1;
             diag[0]++;
             // No usable baseline: read the whole aggregate once and adopt the counter. Rebuilding from
             // scratch is also what makes the counter usable as a full snapshot for a caller: it must
             // not keep a key that no query writes any more, and in partial mode every sync lands here.
             maintainedCounter = toCounter(index.available());
-            maintainedRevision = index.deltaRevision();
+            maintainedRevision = revisionAfter;
             return true;
         }
-        if (revisionAfter == revisionBefore) {
+        if (revisionAfter == maintainedRevision) {
             return true;
         }
-        var changes = index.deltasSince(revisionBefore);
+        var fromRevision = maintainedRevision;
+        var changes = index.deltaBatchSince(fromRevision);
         if (changes == null) {
+            lastDeltaBatch = null;
+            lastDeltaFromRevision = -1;
             diag[0]++;
             // The change log no longer covers the gap, so rebuild instead of guessing.
             maintainedCounter = toCounter(index.available());
-            maintainedRevision = index.deltaRevision();
+            maintainedRevision = revisionAfter;
             return true;
+        }
+        if (retainDeltaBatch) {
+            lastDeltaBatch = changes;
+            lastDeltaFromRevision = fromRevision;
         }
         diag[1]++;
         var diagStart = System.nanoTime();
         var keys = interner.keys();
-        for (var change : changes.changes()) {
-            var key = keys.get(change.keyId());
-            if (change.newTotal() == 0) {
+        for (var i = 0; i < changes.size(); i++) {
+            var key = keys.get(changes.keyIdAt(i));
+            if (changes.newTotalAt(i) == 0) {
                 maintainedCounter.remove(key);
             } else {
-                maintainedCounter.set(key, change.newTotal());
+                maintainedCounter.set(key, changes.newTotalAt(i));
             }
         }
         maintainedRevision = changes.revision();
         deltaApplyNanos += System.nanoTime() - diagStart;
-        deltaChangeCount += changes.changes().length;
+        deltaChangeCount += changes.size();
         deltaCallCount++;
         return true;
     }
@@ -662,9 +676,9 @@ public final class RustStorageIndex {
         var count = contents.size();
         profRead += System.nanoTime() - t0;
         var t1 = System.nanoTime();
-        if (idScratch.length < count) {
-            idScratch = new long[Math.max(count, idScratch.length * 2)];
-            amountScratch = new long[Math.max(count, amountScratch.length * 2)];
+        var required = Math.multiplyExact(count, 2);
+        if (entryScratch.length < required) {
+            entryScratch = new long[required];
         }
         var i = 0;
         for (var entry : contents) {
@@ -672,20 +686,14 @@ public final class RustStorageIndex {
             // hands out and the deltas it reports have to agree on which object represents a resource,
             // or an update to one variant overwrites another variant's amount.
             var canonical = interner.internCanonical(entry.getKey());
-            idScratch[i] = interner.idOf(canonical);
-            amountScratch[i] = entry.getLongValue();
+            entryScratch[i * 2] = interner.idOf(canonical);
+            entryScratch[i * 2 + 1] = entry.getLongValue();
             i++;
         }
-        // The scratch buffers are reused between cells and the native side only sees
-        // `amountScratch.length` entries, so the tail of a previous, larger cell has to be cleared.
-        // Leaving stale ids behind would resurrect a previous cell's contents.
         profIntern += System.nanoTime() - t1;
         var t2 = System.nanoTime();
-        java.util.Arrays.fill(idScratch, i, idScratch.length, 0L);
-        java.util.Arrays.fill(amountScratch, i, amountScratch.length, 0L);
-        // Interning may have assigned new ids, so make sure the native key space covers them.
-        index.ensureKeyCapacity(interner.size());
-        index.pushCell(mounted.cellId, interner.size(), idScratch, amountScratch);
+        // Rust reads only the populated prefix. Its push also grows the key space.
+        index.pushCell(mounted.cellId, interner.size(), entryScratch, i);
         profPush += System.nanoTime() - t2;
         mounted.pushed = true;
         mounted.keyCount = i;
@@ -760,29 +768,43 @@ public final class RustStorageIndex {
      */
     @Nullable
     public ChangeSet deltasSince(long sinceRevision) {
-        if (!sync()) {
+        if (!sync(true)) {
             return null;
         }
-        if (mountsChanged) {
-            mountsChanged = false;
-            return null;
+        try {
+            if (mountsChanged) {
+                mountsChanged = false;
+                return null;
+            }
+            if (uncoveredVisible) {
+                // The change log only describes the mounts the mirror reproduced. Returning it here would
+                // silently omit every change to an excluded mount, so the caller is sent to the full
+                // refresh, which reads the excluded mounts in Java.
+                return null;
+            }
+            if (sinceRevision == maintainedRevision) {
+                return new ChangeSet(maintainedRevision, List.of());
+            }
+            // A changed tick already fetched this exact batch to update maintainedCounter.
+            // Reusing it avoids a second JNI call and a second native-to-Java array copy.
+            var nativeChanges = lastDeltaFromRevision == sinceRevision && lastDeltaBatch != null
+                    && lastDeltaBatch.revision() == maintainedRevision
+                            ? lastDeltaBatch
+                            : index.deltaBatchSince(sinceRevision);
+            if (nativeChanges == null) {
+                return null;
+            }
+            var keys = interner.keys();
+            var changes = new ArrayList<KeyChange>(nativeChanges.size());
+            for (var i = 0; i < nativeChanges.size(); i++) {
+                changes.add(new KeyChange(keys.get(nativeChanges.keyIdAt(i)), nativeChanges.oldTotalAt(i),
+                        nativeChanges.newTotalAt(i)));
+            }
+            return new ChangeSet(nativeChanges.revision(), changes);
+        } finally {
+            lastDeltaBatch = null;
+            lastDeltaFromRevision = -1;
         }
-        if (uncoveredVisible) {
-            // The change log only describes the mounts the mirror reproduced. Returning it here would
-            // silently omit every change to an excluded mount, so the caller is sent to the full
-            // refresh, which reads the excluded mounts in Java.
-            return null;
-        }
-        var nativeChanges = index.deltasSince(sinceRevision);
-        if (nativeChanges == null) {
-            return null;
-        }
-        var keys = interner.keys();
-        var changes = new ArrayList<KeyChange>(nativeChanges.changes().length);
-        for (var change : nativeChanges.changes()) {
-            changes.add(new KeyChange(keys.get(change.keyId()), change.oldTotal(), change.newTotal()));
-        }
-        return new ChangeSet(nativeChanges.revision(), changes);
     }
 
     /** Diagnostic: the sum of the native network totals. */
