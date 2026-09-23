@@ -47,6 +47,9 @@ pub const NO_KEY: u32 = u32::MAX;
 /// window and is told to recompute, which is correct.
 const DELTA_LOG_CAPACITY: usize = 262_144;
 
+/// Slot value that no cell can occupy, used to retire a removed cell's id.
+const NO_SLOT: u32 = u32::MAX;
+
 /// A change to one key's network-wide total.
 ///
 /// Recording `(old, new)` rather than a magnitude lets a consumer detect that its baseline is wrong
@@ -498,7 +501,12 @@ impl NetworkIndex {
         self.ensure_postings(key_capacity);
         let id = self.slot_of.len() as u32;
         if let Some(reused) = self.cells.iter().position(|c| !c.alive) {
+            // The removed cell's id must stop resolving. It used to keep describing the reused slot,
+            // so an unmounted storage kept reporting whatever took its place, and the mirror would
+            // read a drive that no longer exists.
+            let stale_id = self.cells[reused].identity;
             self.cells[reused] = Cell::new(priority, id);
+            self.slot_of[stale_id as usize] = NO_SLOT;
             self.slot_of.push(reused as u32);
         } else {
             self.slot_of.push(self.cells.len() as u32);
@@ -1364,6 +1372,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A cell id must never resolve to another cell's slot, and removing a cell must not leave the
+    /// network's totals describing it.
+    #[test]
+    fn cell_ids_stay_stable_across_reuse() {
+        let mut net = idx();
+        let a = net.add_cell(8, 0);
+        net.push_cell(a, 8, &[(1, 10)]);
+
+        // Removing and re-adding must not make the old id resolve to the new cell.
+        net.remove_cell(a);
+        assert_eq!(net.total_of(1), 0, "a removed cell must leave the totals");
+
+        let b = net.add_cell(8, 0);
+        net.push_cell(b, 8, &[(2, 7)]);
+        assert_eq!(net.total_of(2), 7);
+        assert_eq!(net.total_of(1), 0, "the new cell must not inherit the old one's keys");
+        assert_eq!(net.total_amount(), 7);
+        assert_eq!(net.cell_count(), 1);
+
+        // The old id must be gone, not pointing at the reused slot.
+        assert!(net.slot(a).is_none(), "removed cell id {a} must not resolve to a slot");
+
+        // And a third cell must not collide with either.
+        let c = net.add_cell(8, 0);
+        net.push_cell(c, 8, &[(3, 5)]);
+        assert_eq!(net.total_amount(), 12);
+        assert_eq!(net.cell_count(), 2);
+        assert_ne!(net.slot(b), net.slot(c));
     }
 
     #[test]
