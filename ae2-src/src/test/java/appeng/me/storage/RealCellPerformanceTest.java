@@ -224,7 +224,13 @@ class RealCellPerformanceTest {
     @Test
     void measureSteadyStateAggregate() {
         var keys = collectKeys();
-        var cellCount = keys.size() / TYPES_PER_CELL;
+        var maxCells = keys.size() / TYPES_PER_CELL;
+        for (var cellCount : new int[] { 1, 4, maxCells / 2, maxCells }) {
+            measureSteadyState(keys, cellCount);
+        }
+    }
+
+    private void measureSteadyState(List<AEKey> keys, int cellCount) {
         var fixture = buildFixture(keys, cellCount);
         var iterations = 3000;
 
