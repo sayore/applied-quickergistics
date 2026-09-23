@@ -67,13 +67,17 @@ measures both paths against the same cells. Launch with
 | 14 cells / 882 types, no changes | 33.0-43.2 µs | 0.11-0.19 µs | 230-396× |
 | 4 cells / 252 types, no changes | 11.0-16.4 µs | 0.07-0.54 µs | 30-166× |
 | 1 cell / 63 types, no changes | 3.9-4.5 µs | 0.46-0.68 µs | 6-10× |
-| 29 cells, one cell mutates per tick, consumer keeps the returned counter | 88.8-113.8 µs | 18.3-23.7 µs | **4.1-5.2×** |
+| 29 cells, one cell mutates per tick, delta stream on (default) | 108.1 µs | 14.5 µs | **7.4×** |
+| 29 cells, one cell mutates per tick, delta stream forced off | 88.8-113.8 µs | 18.3-23.7 µs | 4.1-5.2× |
 | 29 cells, one cell mutates per tick, consumer owns its counter | 88.8-113.8 µs | 167-197 µs | 0.5× |
 
-The per-tick phase is attributed with `RustStorageIndex#profilingSummary`: of the ~20 µs, 17 µs is
-`sync` (a version check per mount plus the one dirty cell), 1.0 µs is re-reading that cell, 3.0 µs is
-the JNI push for its 63 entries, and 0.2 µs applies the resulting change. **The remaining cost is
-AE2's own cell read, not the mirror.**
+The per-tick phase is attributed with `RustStorageIndex#profilingSummary`. On a mutating tick the
+remaining ~11.6 µs is `sync` (a version check per mount plus the one dirty cell), of which ~4.7 µs is
+re-reading that cell and ~2.2 µs is the JNI push for its 63 entries; applying the resulting change is
+~0.06 µs. **The remaining cost is AE2's own cell read, not the mirror.**
+
+`measureStorageServiceTickAccounting` isolates the part that depends on the network rather than on the
+changed cell: the walk `StorageService` does to find out what changed.
 
 The last row is the honest caveat: a consumer that owns its counter copies all 1827 types out of the
 mirror, and that copy is proportional to the network and dominates everything. The mirror cannot
@@ -210,36 +214,28 @@ Minecraft at all.
 | No speedup at all | a mount cannot report a version | check for third-party `MEStorage` implementations that do not implement `VersionedStorage` |
 | `UnsatisfiedLinkError` for a specific method | stale native library | rebuild with `cargo build --release`; the loader prefers the copy bundled in the jar |
 
-## Incremental refresh (implemented, disabled by default)
+## Incremental refresh (on by default)
 
-`NetworkIndex` keeps a revisioned change log, so a consumer that reports the revision it last saw can
-receive only the keys that changed instead of a full aggregate. The log, its JNI surface
-(`deltasSince`) and the consumer side (`NetworkStorage.deltasSince`, `StorageService.applyDeltas`) are
-implemented and verified; the per-tick path is gated behind `-Dae2.native.incremental=true` and is
-**off by default**.
+`NetworkIndex` keeps a revisioned change log, so a consumer that reports the revision it last saw receives only the keys that changed instead of a full aggregate. The log, its JNI surface (`deltasSince`) and the consumer side (`NetworkStorage.deltasSince`, `StorageService.applyDeltas`) are implemented, verified and **on by default**. `-Dae2.native.incremental=false` forces the full-walk path, which is how the two are compared.
 
-Why it is still off: the original reason was on the mirror side and is fixed. `push_cell` used to
-re-record a changed cell's whole content, so one mutation produced hundreds of log entries and
-applying them cost more than one full aggregate (~1.8 ms/tick versus ~1.1 ms/tick on a 400-cell
-network). It now records one entry per key whose total actually moved, which is one entry per
-inserted item - asserted by `one_mutation_records_proportionally_few_changes` and measured in
-`harness/`.
+What it buys is not in `NetworkStorage#getAvailableStacks` - it is in what `StorageService` does *around* that call. The shared-counter path has no list of changed keys, so to decide which watchers to notify it walks **every stored type** and compares it against the previous amount. The delta path is told what changed. Measured on 29 cells / 1827 types, with the same single mutation per tick:
 
-What keeps it off is the comparison it would win, not a defect: the aggregated path it replaces is
-already cheap. A consumer that hands the mirror's own counter back (`StorageService` does exactly
-that) pays 0.2 us for the whole refresh, while `applyDeltas` pays for a JNI call, a change-list
-allocation and the watcher bookkeeping per changed key. On the 29-cell benchmark both land around
-20 us per tick, dominated by re-reading the one changed cell (`cellRead=1.0 us`, JNI `3.0 us`,
-`sync=17 us`), so the delta stream has little left to remove. It stays available for consumers that
-own their counter and would otherwise copy the aggregate - measured at 197 us/tick for 1827 types -
-and for networks large enough that the change-log walk becomes the cheaper side.
+| Tick accounting | Java |
+| --- | ---: |
+| shared counter: query + walk every stored type | 105.4 µs |
+| delta list: query + touch the changed key | 15.1 µs |
 
-The change log itself is correct and covered by tests: a property test replays it from a recorded
-revision over 400 rounds of pushes, deltas, extraction, insertion and reprioritisation and asserts
-that the reconstruction equals the real aggregate and that every claimed old value matches the
-consumer's baseline. Revisions are deliberately dense - entries are not merged across revisions, and
-a cancelling change is recorded rather than elided, because a consumer that fell behind would
-otherwise replay an entry whose old value does not match its baseline.
+That is what moves the end-to-end mutating tick from 4.1-5.2x to **7.4x**. `StorageService` also skips the walk entirely when the mirror's revision has not moved, so an idle tick is free rather than proportional to the network.
+
+The change log is dense: entries are not merged across revisions, and a cancelling change is recorded rather than elided, because a consumer that fell behind would otherwise replay an entry whose old value does not match its baseline. A property test replays it from a recorded revision over 400 rounds of pushes, deltas, extraction, insertion and reprioritisation and asserts that the reconstruction equals the real aggregate. `RustRealCellTest#deltaStreamReplaysToTheSameAggregateAsAFullRefresh` does the same against real AE2 cells.
+
+### The bug that kept it off, and the one that was hiding behind it
+
+The original reason was on the mirror side and is fixed: `push_cell` used to re-record a changed cell's whole content, so one mutation produced hundreds of log entries and applying them cost more than one full aggregate. It now records one entry per key whose total actually moved.
+
+Enabling the path then exposed a second, worse bug, which is why the switch was not simply flipped. `DenseKeyInterner` interned keys by **instance identity**, but AE2 keys are value objects: `AEItemKey.of(stack)` returns a fresh instance on every call, and `AEKey#getPrimaryKey()` is the shared `Item`. The network routinely produces two instances for one resource - a cell read builds one, the native aggregate is resolved back through the interner to another - so one logical item got **two ids**. The native index summed the item correctly across both ids while the Java counter kept them apart, so applying a delta to one variant overwrote the other's amount. Concretely, with a cell holding 100 stone and another holding 7: `+17` reported 117 instead of 124, and the next tick set the total to 8.
+
+Nothing caught it earlier because a wrong counter is not a crash and the stream was off. `RustRealCellTest#deltaStreamReplaysToTheSameAggregateAsAFullRefresh` is the regression test: it drives 400 random mutations into two real cells and asserts that the replayed counter equals a fresh full refresh after **every** round. Interning now keys on the primary key, exactly as `KeyCounter` does.
 
 ## Fuzzy variant index
 

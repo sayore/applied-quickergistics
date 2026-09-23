@@ -414,6 +414,74 @@ class RealCellPerformanceTest {
     }
 
     /**
+     * What `StorageService.updateCachedStacks` costs for a tick that changes one item, split by the two ways it can
+     * find out what changed.
+     * <p>
+     * The shared-counter path has no list of changed keys, so it walks every stored type and compares it against the
+     * previous amount. The delta path is told. That difference - one lookup versus `types` lookups - is what enabling
+     * the delta stream buys, and it is invisible in a benchmark that only times `NetworkStorage#getAvailableStacks`.
+     */
+    @Test
+    void measureStorageServiceTickAccounting() {
+        var keys = collectKeys();
+        var cellCount = keys.size() / TYPES_PER_CELL;
+        var fixture = buildFixture(keys, cellCount);
+        var iterations = 3000;
+        var types = fixture.mirrorMounts().size() * TYPES_PER_CELL;
+        System.out.printf("%n=== StorageService tick accounting, %d cells, %d types ===%n",
+                fixture.mirrorMounts().size(), types);
+
+        var liveKey = keys.get(0);
+        var mirrorLive = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) ((DriveWatcher) fixture
+                .mirrorMounts().get(0)).getDelegate());
+        var mirrorNetwork = fixture.mirrorNetwork();
+        var shared = mirrorNetwork.getSharedAvailableStacks();
+        assertThat(shared).as("mirror must be usable").isNotNull();
+
+        // The amount bookkeeping `StorageService` keeps in parallel with the counter.
+        var previousAmounts = new java.util.IdentityHashMap<AEKey, Long>();
+        for (var entry : shared) {
+            previousAmounts.put(entry.getKey(), entry.getLongValue());
+        }
+
+        // Shared-counter path: no list of changes, so every stored type is compared.
+        var walkMicros = time(i -> {
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.extract(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            mirrorNetwork.getAvailableStacks(shared);
+            var notified = 0;
+            for (var entry : shared) {
+                var old = previousAmounts.get(entry.getKey());
+                if (old == null || old != entry.getLongValue()) {
+                    notified++;
+                }
+            }
+            previousAmounts.replace(liveKey, shared.get(liveKey));
+            if (notified == 0) {
+                throw new IllegalStateException("the tick must report the change");
+            }
+        }, iterations);
+        report("tick accounting, full walk", "java", (long) (walkMicros * 1000 * iterations), iterations);
+
+        // Delta path: the mirror reports the changed keys, so only those are looked at.
+        var deltaMicros = time(i -> {
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.extract(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            var revision = mirrorNetwork.revision();
+            var deltas = mirrorNetwork.deltasSince(revision - 0);
+            if (deltas != null) {
+                for (var change : deltas.changes()) {
+                    previousAmounts.put(change.key(), change.newTotal());
+                }
+            }
+        }, iterations);
+        report("tick accounting, delta list", "java", (long) (deltaMicros * 1000 * iterations),
+                iterations);
+    }
+
+    /**
      * Entry-wise comparison. {@code Map.equals} cannot be used: the maps are identity maps and the values are boxed
      * longs.
      */

@@ -20,6 +20,8 @@ package appeng.storage.nativebridge;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.function.Function;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -36,22 +38,53 @@ import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
  */
 public final class DenseKeyInterner<T> {
     private final Reference2IntMap<T> ids = new Reference2IntOpenHashMap<>();
+    /**
+     * The canonical instance per id, keyed by the key's primary key.
+     * <p>
+     * AE2 keys are value objects: {@code AEItemKey.of(stack)} returns a fresh instance every call, while
+     * {@code getPrimaryKey()} returns the shared {@code Item}. Interning by instance identity therefore gave one
+     * logical resource several ids as soon as two code paths produced their own instance for it - which is exactly what
+     * the network does, since a cell read and the native aggregate each build their own keys. The native side then
+     * summed the resource correctly across those ids while the Java counter kept them apart, so an increment to one id
+     * overwrote the other's amount. Interning by primary key, like {@code KeyCounter} does, gives one id per logical
+     * resource.
+     */
+    private final Reference2IntMap<Object> idsByPrimaryKey = new Reference2IntOpenHashMap<>();
     private final List<T> keys = new ArrayList<>();
+    private final Function<T, Object> primaryKey;
 
-    public DenseKeyInterner() {
+    public DenseKeyInterner(Function<T, Object> primaryKey) {
+        this.primaryKey = Objects.requireNonNull(primaryKey, "primaryKey");
         ids.defaultReturnValue(-1);
+        idsByPrimaryKey.defaultReturnValue(-1);
     }
 
     /**
-     * @return the id for {@code key}, assigning a new one if needed.
+     * @return the instance this interner already uses for {@code key}'s primary key, or {@code key} itself if it is the
+     *         first one seen.
      */
+    public T internCanonical(T key) {
+        var id = intern(key);
+        return keyOf(id);
+    }
+
     public int intern(T key) {
-        var id = ids.getInt(key);
-        if (id >= 0) {
-            return id;
+        var existing = ids.getInt(key);
+        if (existing >= 0) {
+            return existing;
         }
-        id = keys.size();
+        var pk = primaryKey.apply(key);
+        var byPrimaryKey = idsByPrimaryKey.getInt(pk);
+        if (byPrimaryKey >= 0) {
+            // Another instance of the same logical resource is already interned. Remember this instance
+            // too, so a repeat lookup by identity stays cheap, but hand back the id and the canonical
+            // instance the rest of the system already uses.
+            ids.put(key, byPrimaryKey);
+            return byPrimaryKey;
+        }
+        var id = keys.size();
         ids.put(key, id);
+        idsByPrimaryKey.put(pk, id);
         keys.add(key);
         return id;
     }

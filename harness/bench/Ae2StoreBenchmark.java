@@ -36,6 +36,14 @@ public final class Ae2StoreBenchmark {
         private final int id;
         private final int hashCode;
 
+        /**
+         * Mirrors {@code AEKey#getPrimaryKey}: the identity the interner groups variants by. Here the
+         * fake key is its own primary key, so the benchmark stays one-id-per-key.
+         */
+        Object getPrimaryKey() {
+            return this;
+        }
+
         FakeKey(int id) {
             this.id = id;
             // Model ItemStack#hashItemAndComponents: not free, but cheap.
@@ -175,7 +183,7 @@ public final class Ae2StoreBenchmark {
         final Params params;
         final FakeKey[] keys;
         final List<JavaCell> cells = new ArrayList<>();
-        final DenseKeyInterner<FakeKey> interner = new DenseKeyInterner<>();
+        final DenseKeyInterner<FakeKey> interner = new DenseKeyInterner<>(FakeKey::getPrimaryKey);
         final NativeNetworkIndex nativeIndex;
         final int[] cellIds;
         final int[] keyIds;

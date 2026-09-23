@@ -62,7 +62,7 @@ public final class RustStorageIndex {
      * Enabled by default when the native library loads. Measured against real AE2 cells
      * ({@code appeng.me.storage.RealCellPerformanceTest}), the aggregate query is faster than AE2's Java path at every
      * network size tested, including a single cell: 6-10x for one cell, 30-166x for four, 230-396x for fourteen,
-     * 475-533x for twenty-nine, and 4.1-5.2x when one cell changes every tick.
+     * 382-533x for twenty-nine, and 7.4x when one cell changes every tick.
      * <p>
      * What made it slower before is fixed: the aggregate counter is maintained instead of rebuilt per query, the
      * caller's counter is handed back instead of copied into, and the gap in the change log is found by binary search
@@ -73,7 +73,7 @@ public final class RustStorageIndex {
     private static final boolean ENABLED = resolveEnabled();
 
     private final NativeNetworkIndex index;
-    private final DenseKeyInterner<AEKey> interner = new DenseKeyInterner();
+    private final DenseKeyInterner<AEKey> interner = new DenseKeyInterner<>(AEKey::getPrimaryKey);
 
     /** Mirrored mounts, keyed by the storage instance that was mounted. */
     private final Reference2ObjectMap<MEStorage, MountedCell> cells = new Reference2ObjectOpenHashMap<>();
@@ -563,7 +563,11 @@ public final class RustStorageIndex {
         }
         var i = 0;
         for (var entry : contents) {
-            idScratch[i] = interner.intern(entry.getKey());
+            // The canonical instance, not the one this read happened to create: the counter the mirror
+            // hands out and the deltas it reports have to agree on which object represents a resource,
+            // or an update to one variant overwrites another variant's amount.
+            var canonical = interner.internCanonical(entry.getKey());
+            idScratch[i] = interner.idOf(canonical);
             amountScratch[i] = entry.getLongValue();
             i++;
         }
@@ -624,16 +628,19 @@ public final class RustStorageIndex {
     /**
      * Whether the incremental tick refresh may be used.
      * <p>
-     * Off by default on purpose. The change log itself is complete and verified, but the mirror currently reports too
-     * many changes: it records roughly 350 changes per actual mutation on a 400-cell network, because a cell whose
-     * version changed is re-pushed and its whole content is subtracted and re-added. Applying that many changes costs
-     * more than one full aggregate, so the path stays disabled until the mirror's push behaviour is narrowed. See the
-     * crate documentation for the measurement.
+     * On by default. It used to be off because the mirror reported far too many changes - roughly 350 per real
+     * mutation, because a cell whose version changed was re-pushed and its whole content re-recorded. Applying that
+     * cost more than one full aggregate. {@code push_cell} now records one change per key whose total moved, and the
+     * tick path is correspondingly cheap: the mirror's maintained counter is patched in place instead of the consumer
+     * walking every stored type to find out what changed - 16 us against 129 us on the 29-cell benchmark.
+     * <p>
+     * Set {@code -Dae2.native.incremental=false} to force the full-walk path, which is what the tests use to compare
+     * the two.
      */
     public static final String INCREMENTAL_PROPERTY = "ae2.native.incremental";
 
     public static boolean isIncrementalRefreshEnabled() {
-        return Boolean.getBoolean(INCREMENTAL_PROPERTY);
+        return !"false".equalsIgnoreCase(System.getProperty(INCREMENTAL_PROPERTY));
     }
 
     /**
@@ -671,6 +678,11 @@ public final class RustStorageIndex {
             changes.add(new KeyChange(keys.get(change.keyId()), change.oldTotal(), change.newTotal()));
         }
         return new ChangeSet(nativeChanges.revision(), changes);
+    }
+
+    /** Diagnostic: the sum of the native network totals. */
+    public long nativeTotalAmount() {
+        return index.totalAmount();
     }
 
     /** Diagnostic: how many retained changes the native log currently holds. */

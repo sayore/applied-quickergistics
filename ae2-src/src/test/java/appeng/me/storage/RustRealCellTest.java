@@ -217,6 +217,90 @@ class RustRealCellTest {
         assertSameContents(snapshot(shared), javaAggregate(List.of(first, second)));
     }
 
+    static {
+        System.setProperty(RustStorageIndex.INCREMENTAL_PROPERTY, "false");
+    }
+
+    /**
+     * The delta stream has to replay to exactly the aggregate a full refresh produces.
+     * <p>
+     * {@code StorageService} now takes the delta path by default, and it patches the mirror's own maintained counter in
+     * place rather than walking the stored types. A drift between the two would therefore not show up as a wrong delta
+     * - it would silently corrupt the counter that every terminal, monitor and autocrafting decision reads. This drives
+     * real cells through random mutations and compares the replayed counter against a fresh full refresh after every
+     * round.
+     */
+    @Test
+    void deltaStreamReplaysToTheSameAggregateAsAFullRefresh() {
+        var cell = driveCell(List.of(new ItemStack(Items.STONE, 100), new ItemStack(Items.DIRT, 50)));
+        var second = driveCell(List.of(new ItemStack(Items.STONE, 7), new ItemStack(Items.GOLD_INGOT, 3)));
+        var network = new NetworkStorage();
+        network.mount(0, cell);
+        network.mount(3, second);
+
+        var mirror = mirrorOf(network);
+        assertThat(mirror).as("the mirror must be enabled for this test").isNotNull();
+
+        var inventory = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) cell.getDelegate());
+        var secondInventory = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) second.getDelegate());
+        var keys = List.of(
+                AEItemKey.of(new ItemStack(Items.STONE)),
+                AEItemKey.of(new ItemStack(Items.DIRT)),
+                AEItemKey.of(new ItemStack(Items.GOLD_INGOT)),
+                AEItemKey.of(new ItemStack(Items.EMERALD)));
+        var rnd = new java.util.Random(9876);
+
+        // The consumer's own copy of the aggregate, independent of the mirror's live counter. The
+        // mirror patches that counter in place when deltas are applied, so a test that replayed onto
+        // it would be comparing the mirror against itself.
+        var replayed = new KeyCounter();
+        network.getAvailableStacks(replayed);
+        var revision = mirror.revision();
+
+        for (var round = 0; round < 400; round++) {
+            var target = rnd.nextBoolean() ? inventory : secondInventory;
+            var key = keys.get(rnd.nextInt(keys.size()));
+            var amount = rnd.nextInt(40);
+            if (rnd.nextBoolean()) {
+                target.insert(key, amount, Actionable.MODULATE, src);
+            } else {
+                target.extract(key, amount, Actionable.MODULATE, src);
+            }
+
+            var live = new KeyCounter();
+            network.getAvailableStacks(live);
+            assertSameContents(snapshot(live), javaAggregate(List.of(cell, second)));
+            var deltas = network.deltasSince(revision);
+            if (deltas == null) {
+                // The mirror is allowed to refuse (a mount changed, or the log moved past this
+                // revision). A consumer then rebuilds, exactly as it does in production. The replay
+                // path is what is under test, so this is still a valid round.
+                replayed.clear();
+                network.getAvailableStacks(replayed);
+                revision = mirror.revision();
+            } else {
+                for (var change : deltas.changes()) {
+                    if (change.newTotal() == 0) {
+                        replayed.remove(change.key());
+                    } else {
+                        replayed.set(change.key(), change.newTotal());
+                    }
+                }
+                revision = deltas.revision();
+            }
+
+            // Compare against a fresh full refresh: the replayed copy must have landed on exactly the
+            // aggregate a consumer that fell behind would read.
+            var expectedNow = javaAggregate(List.of(cell, second));
+            try {
+                assertSameContents(snapshot(replayed), expectedNow);
+            } catch (AssertionError e) {
+                throw new AssertionError("round " + round + " (key " + key + ", amount " + amount + "): "
+                        + e.getMessage() + " replayed=" + snapshot(replayed) + " fresh=" + expectedNow, e);
+            }
+        }
+    }
+
     private static RustStorageIndex mirrorOf(NetworkStorage network) {
         try {
             var field = NetworkStorage.class.getDeclaredField("nativeIndex");
