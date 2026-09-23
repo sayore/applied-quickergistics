@@ -162,14 +162,52 @@ feature; `harness/run.sh` covers the same ground outside the FML harness.
 | No speedup at all | a mount cannot report a version | check for third-party `MEStorage` implementations that do not implement `VersionedStorage` |
 | `UnsatisfiedLinkError` for a specific method | stale native library | rebuild with `cargo build --release`; the loader prefers the copy bundled in the jar |
 
+## Incremental refresh (implemented, disabled by default)
+
+`NetworkIndex` keeps a revisioned change log, so a consumer that reports the revision it last saw can
+receive only the keys that changed instead of a full aggregate. The log, its JNI surface
+(`deltasSince`) and the consumer side (`NetworkStorage.deltasSince`, `StorageService.applyDeltas`) are
+implemented and verified; the per-tick path is gated behind `-Dae2.native.incremental=true` and is
+**off by default**.
+
+Why it is off: measured with `harness/src/harness/TickRefreshBenchmark.java`, the mirror reports far
+more changes than the network actually saw — on a 400-cell network with 20 mutations per tick it
+records roughly 15 000 changes per tick. The cause is on the mirror side, not in the change log: a
+cell whose version changed is re-pushed and its entire content is re-recorded, so each real mutation
+produces hundreds of log entries. Applying those costs more than one full aggregate
+(~1.8 ms/tick versus ~1.1 ms/tick), so enabling it would be a regression.
+
+The change log itself is correct and covered by tests: a property test replays it from a recorded
+revision over 400 rounds of pushes, deltas, extraction, insertion and reprioritisation and asserts
+that the reconstruction equals the real aggregate and that every claimed old value matches the
+consumer's baseline. Revisions are deliberately dense — entries are not merged across revisions,
+because a consumer that fell behind would otherwise replay an entry whose old value does not match
+its baseline.
+
+The remaining work is to narrow what the mirror re-reads: a cell should contribute only the keys
+whose amounts changed, not its whole content, and `push_cell` should be able to reuse a cell's
+existing ids. Once that is fixed the path can be enabled and the benchmark should be re-run.
+
+## Fuzzy variant index
+
+Independent of the native work, `KeyCounter` used to build an AVL-backed fuzzy variant index for
+every damageable key from the ordinary counting path, even though only the storage bus, export bus
+and level emitter (with a fuzzy card) ever search by durability. It now converts a primary key to that
+index the first time `findFuzzy` is called, so counters that are never fuzzy-searched never build a
+tree. See `appeng.api.stacks.KeyCounter`.
+
 ## Limitations and next steps
 
 * Only the aggregate read path is accelerated. Extract/insert fan-out is untouched.
 * Fuzzy/partition filtering is handled by refusing to mirror filtered `MEInventoryHandler` mounts
   rather than by replicating the filter natively. Replicating it would let `Storage Bus`, `Export Bus`
   and level-emitter networks benefit too.
-* A per-key posting list (`key → cells holding it`) would remove the remaining linear scan in the
-  filtered query; today that path relies on the per-cell bitset.
+* ~~A per-key posting list would remove the remaining linear scan in the filtered query.~~
+  Implemented: `NetworkIndex` keeps a reverse index of the cells holding each key, `extract` visits
+  only those cells, and a filtered query picks the cheaper of walking the posting lists versus
+  reading the cached aggregate.
+* The mirror's per-cell push should send only the changed keys instead of the whole cell. That is
+  what blocks enabling the incremental refresh described above.
 * If a future AE2 version lands [#8965/#8966/#8967](https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8967),
   the Java baseline in the benchmark should be updated to match, because those PRs change the very code
   the baseline models.
