@@ -21,11 +21,10 @@ package appeng.storage.nativebridge;
 /**
  * Raw JNI entry points for the {@code ae2store} Rust library.
  * <p>
- * Every method name maps 1:1 to the exported symbol
- * {@code Java_appeng_storage_nativebridge_NativeBindings_<name>} in {@code rust/ae2store-jni}.
- * Keeping the bindings in their own class (rather than making them private natives of
- * {@link NativeNetworkIndex}) means the Java name and the symbol name are identical, which removes a
- * whole class of {@code UnsatisfiedLinkError} mistakes.
+ * Every method name maps 1:1 to the exported symbol {@code Java_appeng_storage_nativebridge_NativeBindings_<name>} in
+ * {@code rust/ae2store-jni}. Keeping the bindings in their own class (rather than making them private natives of
+ * {@link NativeNetworkIndex}) means the Java name and the symbol name are identical, which removes a whole class of
+ * {@code UnsatisfiedLinkError} mistakes.
  * <p>
  * Do not call this class directly from outside the bridge package; use {@link NativeNetworkIndex}.
  */
@@ -71,9 +70,8 @@ final class NativeBindings {
 
     static native long deltaRevision(long handle);
 
+    static native long pendingDeltaCount(long handle);
+
     static native long[] pushStats(long handle);
-
-
-
 
 }

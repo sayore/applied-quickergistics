@@ -34,12 +34,12 @@ import org.jetbrains.annotations.Nullable;
  * <ol>
  * <li>an explicit path from the {@code ae2.native.library} system property,</li>
  * <li>the library bundled in the mod jar (extracted to a temporary file and loaded),</li>
- * <li>a development build in {@code rust/target/release} relative to the working directory, so a
- * plain {@code cargo build --release} is enough while developing,</li>
+ * <li>a development build in {@code rust/target/release} relative to the working directory, so a plain
+ * {@code cargo build --release} is enough while developing,</li>
  * <li>the ordinary {@link System#loadLibrary(String)} search path.</li>
  * </ol>
- * Loading is best-effort: if none of these succeed, {@link #isAvailable()} is false and callers are
- * expected to fall back to the pure-Java implementation.
+ * Loading is best-effort: if none of these succeed, {@link #isAvailable()} is false and callers are expected to fall
+ * back to the pure-Java implementation.
  */
 public final class NativeLibrary {
     public static final String LIBRARY_NAME = "ae2store_jni";

@@ -55,9 +55,40 @@ filtering.
 
 ## Measured results
 
+### Real AE2 cells (the numbers that matter)
+
+`RealCellPerformanceTest` builds genuine `BasicCellInventory` cells behind `DriveWatcher` mounts and
+measures both paths against the same cells. Launch with
+`./gradlew :test --tests appeng.me.storage.RealCellPerformanceTest --rerun-tasks --info`.
+
+| Network | Java (AE2 path) | Rust mirror (incl. JNI) | Speedup |
+| --- | ---: | ---: | ---: |
+| 29 cells / 1827 types, no changes between queries | 105.6-111.1 µs | 0.20-0.22 µs | **475-533×** |
+| 14 cells / 882 types, no changes | 33.0-43.2 µs | 0.11-0.19 µs | 230-396× |
+| 4 cells / 252 types, no changes | 11.0-16.4 µs | 0.07-0.54 µs | 30-166× |
+| 1 cell / 63 types, no changes | 3.9-4.5 µs | 0.46-0.68 µs | 6-10× |
+| 29 cells, one cell mutates per tick, consumer keeps the returned counter | 88.8-113.8 µs | 18.3-23.7 µs | **4.1-5.2×** |
+| 29 cells, one cell mutates per tick, consumer owns its counter | 88.8-113.8 µs | 167-197 µs | 0.5× |
+
+The per-tick phase is attributed with `RustStorageIndex#profilingSummary`: of the ~20 µs, 17 µs is
+`sync` (a version check per mount plus the one dirty cell), 1.0 µs is re-reading that cell, 3.0 µs is
+the JNI push for its 63 entries, and 0.2 µs applies the resulting change. **The remaining cost is
+AE2's own cell read, not the mirror.**
+
+The last row is the honest caveat: a consumer that owns its counter copies all 1827 types out of the
+mirror, and that copy is proportional to the network and dominates everything. The mirror cannot
+remove it for the caller. `StorageService` - the consumer that matters in a tick - hands the mirror's
+counter back, which is the row that describes the game.
+
+### Synthetic benchmark (indicative only)
+
+
+
 `harness/run.sh` builds the library, compiles the tools and runs both the benchmark and the
 integration harness. Machine: 7-core x86_64, JDK 26, Rust 1.98.1, 400 cells, 1500 distinct keys,
-124502 (cell, key) pairs, 2000 iterations.
+124502 (cell, key) pairs, 2000 iterations. These numbers model a **311-type cell**, while AE2 caps a
+cell at **63** types, and the Rust column in the tick-churn row is a native rebuild rather than
+`NetworkStorage#getAvailableStacks`; treat the table as a lower bound on the win, not as the headline.
 
 | Scenario | Java (AE2 path) | Rust mirror (incl. JNI) | Speedup |
 | --- | ---: | ---: | ---: |
@@ -76,9 +107,11 @@ Reading these numbers honestly:
 * The **370×** figure is a *cached* query. It is legitimate for the way AE2 consumes the aggregate (the
   storage-service cache, several crafting simulations, pattern providers and terminals all ask for the
   same thing in one tick), but it is not a pure algorithm speedup.
-* The **13.1×** figure is the honest end-to-end one for a network that actually changes every tick: one
-  cell is dirtied, the cache is invalidated, and the full aggregate has to be rebuilt from 124502
-  entries across the JNI boundary.
+* The **13.1×** figure is for a network that changes every tick, with the mirror rebuilding its
+  aggregate from 124502 entries. It is a lower bound: `push_cell` used to re-record a dirty cell's
+  whole content, and the synthetic benchmark's Rust column predates the diff-based push. The real-cell
+  row above (4-5x against AE2's own `getAvailableStacks`, where most of the remaining time is AE2's own
+  cell read) is the one to use.
 * The **filtered** query only benefits from the per-cell presence bitset, not from the cache; ~2× is
   what a bitset pre-test buys over 12800 hash probes.
 * Single-key `extract`/`insert` are **not** the target and show ~1×: they are already one hash lookup
@@ -185,23 +218,28 @@ receive only the keys that changed instead of a full aggregate. The log, its JNI
 implemented and verified; the per-tick path is gated behind `-Dae2.native.incremental=true` and is
 **off by default**.
 
-Why it is off: measured with `harness/src/harness/TickRefreshBenchmark.java`, the mirror reports far
-more changes than the network actually saw — on a 400-cell network with 20 mutations per tick it
-records roughly 15 000 changes per tick. The cause is on the mirror side, not in the change log: a
-cell whose version changed is re-pushed and its entire content is re-recorded, so each real mutation
-produces hundreds of log entries. Applying those costs more than one full aggregate
-(~1.8 ms/tick versus ~1.1 ms/tick), so enabling it would be a regression.
+Why it is still off: the original reason was on the mirror side and is fixed. `push_cell` used to
+re-record a changed cell's whole content, so one mutation produced hundreds of log entries and
+applying them cost more than one full aggregate (~1.8 ms/tick versus ~1.1 ms/tick on a 400-cell
+network). It now records one entry per key whose total actually moved, which is one entry per
+inserted item - asserted by `one_mutation_records_proportionally_few_changes` and measured in
+`harness/`.
+
+What keeps it off is the comparison it would win, not a defect: the aggregated path it replaces is
+already cheap. A consumer that hands the mirror's own counter back (`StorageService` does exactly
+that) pays 0.2 us for the whole refresh, while `applyDeltas` pays for a JNI call, a change-list
+allocation and the watcher bookkeeping per changed key. On the 29-cell benchmark both land around
+20 us per tick, dominated by re-reading the one changed cell (`cellRead=1.0 us`, JNI `3.0 us`,
+`sync=17 us`), so the delta stream has little left to remove. It stays available for consumers that
+own their counter and would otherwise copy the aggregate - measured at 197 us/tick for 1827 types -
+and for networks large enough that the change-log walk becomes the cheaper side.
 
 The change log itself is correct and covered by tests: a property test replays it from a recorded
 revision over 400 rounds of pushes, deltas, extraction, insertion and reprioritisation and asserts
 that the reconstruction equals the real aggregate and that every claimed old value matches the
-consumer's baseline. Revisions are deliberately dense — entries are not merged across revisions,
-because a consumer that fell behind would otherwise replay an entry whose old value does not match
-its baseline.
-
-The remaining work is to narrow what the mirror re-reads: a cell should contribute only the keys
-whose amounts changed, not its whole content, and `push_cell` should be able to reuse a cell's
-existing ids. Once that is fixed the path can be enabled and the benchmark should be re-run.
+consumer's baseline. Revisions are deliberately dense - entries are not merged across revisions, and
+a cancelling change is recorded rather than elided, because a consumer that fell behind would
+otherwise replay an entry whose old value does not match its baseline.
 
 ## Fuzzy variant index
 
@@ -213,35 +251,28 @@ tree. See `appeng.api.stacks.KeyCounter`.
 
 ## Coverage: what the mirror actually sees
 
-The mirror can only reflect a mount whose changes it can observe, so it requires
+The mirror can only reproduce a mount whose changes it can observe, so it requires
 `VersionedStorage`. Today only `BasicCellInventory` implements it, which means drive cells are
-covered and everything else is not:
+mirrored and everything else is read in Java alongside a mirror that keeps working. The per-mount
+table is under "Storage buses" below.
 
-| Mount | Mirrored | Why |
-| --- | --- | --- |
-| Drive cell (`BasicCellInventory` behind `DriveWatcher`) | yes | reports a version |
-| Storage bus (`StorageBusInventory`) | no | does not report a version |
-| Filtering handler | no | the mirror cannot reproduce the filter |
-| Third-party `MEStorage` | no | does not report a version |
+`RustStorageIndex#describeCoverage()` reports which mounts are mirrored and why the others are not.
+It matters more than it looks: before partial coverage, an excluded mount silently degraded the
+**whole network** to the Java path while still looking healthy, and there was nothing to inspect.
+`RustRealCellTest#coverageReportsExcludedMounts` asserts the report.
 
-The important part is what an excluded mount *does*: it disables the mirror for the **whole network**,
-because the aggregate would otherwise be incomplete. One storage bus in a base therefore costs all of
-the acceleration, silently — the network just runs on the Java path and looks healthy.
-`RustStorageIndex#describeCoverage()` makes that visible, and `RustRealCellTest#coverageReportsExcludedMounts`
-asserts it.
+### Partial coverage
 
-### Next step: partial coverage
-
-**Status: implemented.** `RustStorageIndex#sync` records mounts it cannot reproduce in an uncovered
-set and, when anything is uncovered, leaves its own aggregate alone so it stays exactly the sum of the
-cells it did reproduce. `NetworkStorage` then adds the uncovered mounts in Java. The cost is
-proportional to the uncovered mounts instead of all-or-nothing.
+**Status: implemented.** `RustStorageIndex#sync` records the mounts it cannot reproduce in an
+uncovered set and leaves its own aggregate exactly the sum of the cells it did reproduce.
+`NetworkStorage#getAvailableStacks` then adds the uncovered mounts on top, and `StorageService` does
+the same for the cache it exposes (see below).
 
 The first attempt at this was reverted because a correctness test failed. The cause turned out to be
 in the test rather than the feature: it keyed a counter's contents by key identity, and the test
 environment can hold more than one `Item` instance for the same item (`AEItemKey#getPrimaryKey`
 returns the item), so one logical item legitimately landed in two buckets while the amounts were
-identical. `RustRealCellTest#mixedNetworkMatchesJavaAggregate` now verifies the mixed-network case.
+identical. The failure that followed *that* was real and is described under "Incremental refresh".
 
 The shape is:
 
@@ -249,25 +280,77 @@ The shape is:
 getAvailableStacks(out):
     shared = mirror.getSharedAvailableStacks()      // its own cells, maintained
     if shared != null:
-        out = shared (read-only, as today)
+        if out == shared and nothing is uncovered:
+            return                                  // the consumer already holds it
+        copy shared into out absolutely
         for each mount the mirror does not cover:   // typically none
             mount.getAvailableStacks(out)           // Java, only for those
 ```
 
-That keeps the aggregate exact while making the cost proportional to the uncovered mounts instead of
-all-or-nothing, so one storage bus no longer throws away the whole win. It needs
-`RustStorageIndex` to expose its covered set, and `NetworkStorage` to track the mounts it did not
-hand to the mirror.
+Three details are load-bearing, and all three cost a bug to find:
 
-### Next step: storage buses
+* The uncovered mounts are read into a counter of their own, never into the mirror's counter. That
+  counter is handed out as a shared read-only snapshot across ticks, so adding to it would count the
+  uncovered mounts again on every query.
+* The mirrored amounts are written absolutely (`set`), while the uncovered ones are added (`add`),
+  because `out` may still hold the previous query's contents.
+* Keys that the previous query's uncovered mounts contributed, but which are neither mirrored nor
+  uncovered any more, have to be removed explicitly. Nothing writes them again, so they would stay at
+  their old amount forever.
 
-Covering a storage bus is a separate, smaller problem: `StorageBusPart` already polls its external
-inventory through `ExternalInventoryCache`, so the change detection exists. The bus needs to implement
-`VersionedStorage` and return a counter that moves when that cache reports a change, and the mirror
-needs the bus's `IPartitionList` pushed down as a whitelist (the per-cell whitelist bitset already
-exists in the core; blacklists need a second bitset and a mode). Before enabling this, verify with a
-test that `PrecisePriorityList.getItems()` returns the canonical key instances the identity-based
-interner needs - if it returns copies, their ids will not match the aggregate.
+`StorageService` needs the merged view too, but it must not end up writing into the mirror's counter
+either, and it cannot go incremental on a merged cache. It keeps the uncovered mounts in a counter of
+its own (`uncoveredStacks`), and a non-null value there means "the cache is a merge, rebuild it every
+tick".
+
+`RustStorageIndexTest` covers this: a versioned mount next to an unversioned one stays mirrored, a
+filtered `MEInventoryHandler` mount (which is exactly what a filtered storage bus mounts) is added
+exactly once, repeated queries do not accumulate it, and `deltasSince` refuses to serve while any
+mount is uncovered - a delta stream that only describes the mirrored mounts would silently omit the
+rest.
+
+### Storage buses
+
+| Mount | Mirrored | Why |
+| --- | --- | --- |
+| Drive cell (`BasicCellInventory` behind `DriveWatcher`) | yes | reports a version |
+| Storage bus (`StorageBusInventory`) | partially | no version of its own, but it no longer disables the mirror |
+| Filtering handler | partially | the mirror cannot reproduce the filter, so the mount is read in Java |
+| Third-party `MEStorage` | partially | no version, so the mount is read in Java |
+
+With partial coverage, "no" became "read in Java, next to a mirror that keeps working for everything
+else". One storage bus in a base therefore no longer costs all of the acceleration; it costs itself.
+That is the difference the `uncoveredStacks` path above exists for.
+
+Giving a bus a version of its own is a separate, smaller problem and remains open:
+`ExternalStorageFacade` already has a `setChangeListener` hook that is never wired up, and
+`ExternalInventoryCache.update()` (which returns the changed keys) is never called. The bus could
+report a version that moves when that cache reports a change. Two caveats before doing it:
+
+* `StorageBusInventory` is an `MEInventoryHandler`; if the mirror is to reproduce its filter, the bus's
+  `IPartitionList` has to be pushed down as a whitelist (the per-cell whitelist bitset already exists
+  in the core; blacklists need a second bitset and a mode).
+* `PrecisePriorityList.getItems()` must return the canonical key instances the identity-based interner
+  needs. If it returns copies, their ids will not match the aggregate.
+
+## Changes behind the current numbers
+
+* `push_cell` now diffs the cell against its previous content and records only the totals that
+  actually moved, instead of subtracting and re-adding the whole cell. One item inserted into a
+  63-key cell records **one** change instead of ~126. `one_mutation_records_proportionally_few_changes`
+  pins that down.
+* The change log no longer elides a change that exactly undoes its predecessor. The elision looked
+  safe because nothing observable changed, but it left a gap: a consumer that was one revision behind
+  the cancelled entry replayed the next entry against a baseline it had never reached, and the mirror
+  reported a stale total. `a_lagging_consumer_survives_a_cancelled_change` is the regression test.
+* The per-tick benchmark used to insert one item per iteration without ever removing it, so the
+  network grew to 3000 items while the phase ran. Because the consumer copies the aggregate it is
+  handed, at a cost proportional to the stored types, that measured the consumer's growing copy and
+  reported the mirror as *slower* than plain Java (0.4x). The phase now swaps one item in and one out,
+  so the network is stable and the number describes the refresh itself.
+* `RustStorageIndex#resetProfiling`/`profilingSummary` attribute a phase to `sync`, the cell re-read
+  and the delta application. They exist because the first honest-looking number here (0.4x) was an
+  artifact twice over, and guessing at the cause wasted more time than measuring it.
 
 ## Limitations and next steps
 
@@ -279,8 +362,14 @@ interner needs - if it returns copies, their ids will not match the aggregate.
   Implemented: `NetworkIndex` keeps a reverse index of the cells holding each key, `extract` visits
   only those cells, and a filtered query picks the cheaper of walking the posting lists versus
   reading the cached aggregate.
-* The mirror's per-cell push should send only the changed keys instead of the whole cell. That is
-  what blocks enabling the incremental refresh described above.
+* ~~The mirror's per-cell push should send only the changed keys instead of the whole cell.~~
+  Implemented: `push_cell` diffs the cell and records only the totals that moved, so one mutation
+  produces one change-log entry. The incremental refresh it was blocking is described above; it stays
+  opt-in because the aggregate path it replaces is already cheap, not because it is broken.
+* The cell re-read on a version change is the largest remaining cost of a mutating tick
+  (`cellRead=1.0 us` of `~20 us` in the benchmark, plus `intern=3.2 us` and JNI `3.0 us` for the same
+  63 entries). Pushing only changed keys does not avoid it, because the mirror has to read the cell to
+  find out what changed. A bus or cell that reported its deltas instead of only a version would.
 * If a future AE2 version lands [#8965/#8966/#8967](https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8967),
   the Java baseline in the benchmark should be updated to match, because those PRs change the very code
   the baseline models.

@@ -19,9 +19,12 @@
 package appeng.me.storage;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.NavigableMap;
+import java.util.Set;
 import java.util.TreeMap;
 
 import com.google.common.base.Preconditions;
@@ -51,13 +54,28 @@ public class NetworkStorage implements MEStorage {
     private final List<MEStorage> secondPassInventories = new ArrayList<>();
 
     /**
-     * Optional native read accelerator for {@link #getAvailableStacks(KeyCounter)}. It mirrors this
-     * storage's mounts and is maintained incrementally, so the per-tick aggregate query does not have
-     * to walk every cell. {@code null} whenever the native library is unavailable or the feature is
-     * disabled, in which case the original code path is used unchanged.
+     * Optional native read accelerator for {@link #getAvailableStacks(KeyCounter)}. It mirrors this storage's mounts
+     * and is maintained incrementally, so the per-tick aggregate query does not have to walk every cell. {@code null}
+     * whenever the native library is unavailable or the feature is disabled, in which case the original code path is
+     * used unchanged.
      */
     @Nullable
     private RustStorageIndex nativeIndex = RustStorageIndex.createIfAvailable();
+
+    /**
+     * The mounts the mirror could not reproduce, read into a counter of this network's own.
+     * <p>
+     * {@code null} means the last query was served purely by the mirror. Keeping them in a separate counter is what
+     * makes a partial mirror safe: the mirror's counter is shared with the mirror and handed out across ticks, so
+     * accumulating into it would count these mounts again every query.
+     */
+    private KeyCounter uncoveredStacks;
+    /**
+     * Keys the previous query's {@link #uncoveredStacks} held. A key that is no longer mirrored and no longer uncovered
+     * has to be removed from the caller's counter explicitly, because the mirrored amounts are written absolutely only
+     * for keys the mirror still has.
+     */
+    private final Set<AEKey> expiredUncovered = Collections.newSetFromMap(new IdentityHashMap<>());
 
     // Queued mount/unmount operations that occurred while an insert/extract was ongoing
     // Is only non-null if something is queued
@@ -232,39 +250,54 @@ public class NetworkStorage implements MEStorage {
             if (accelerated != null) {
                 // Whatever the mirror could not reproduce is read here in Java and added on top, so
                 // one such mount costs only itself instead of disabling the mirror for the network.
+                // This used to be all-or-nothing: a single storage bus dropped the whole network onto
+                // the Java path and threw away the acceleration for every mirrored cell with it.
                 var uncovered = index.getUncoveredMounts();
-                if (!uncovered.isEmpty()) {
-                    mountsInUse = true;
-                    try {
-                        for (var invList : this.priorityInventory.values()) {
-                            for (var inv : invList) {
-                                if (uncovered.contains(inv)) {
-                                    inv.getAvailableStacks(accelerated);
-                                }
-                            }
-                        }
-                    } finally {
-                        mountsInUse = false;
+                if (uncovered.isEmpty()) {
+                    // A caller that passes back the exact counter this method handed out last time is
+                    // already up to date, so there is nothing to copy. StorageService does this every
+                    // tick; copying instead cost ~232 us for 1827 stored types, while the maintained
+                    // counter is ready in under a microsecond.
+                    uncoveredStacks = null;
+                    if (out == accelerated) {
+                        return;
                     }
-                }
-
-                // A caller that passes back the exact counter this method handed out last time is
-                // already up to date, so there is nothing to copy. StorageService does this every
-                // tick; copying instead cost ~232 us for 1827 stored types, while the maintained
-                // counter is ready in under a microsecond.
-                if (out == accelerated) {
-                    return;
-                }
-                // `out` may already have been cleared via KeyCounter#clear, which only clears the
-                // inner variant counters and keeps the primary-key entries. Setting absolute amounts
-                // is therefore correct regardless of the state `out` arrives in.
-                for (var entry : accelerated) {
-                    out.set(entry.getKey(), entry.getLongValue());
+                    copyInto(accelerated, out);
+                } else {
+                    // The uncovered mounts are read into a counter of their own and merged, never into
+                    // the mirror's counter, which is shared and handed out across ticks. The amounts
+                    // are written absolutely because `out` may still hold the previous query's
+                    // contents, while the uncovered part is simply added on top of them.
+                    if (uncoveredStacks == null) {
+                        uncoveredStacks = new KeyCounter();
+                    } else {
+                        uncoveredStacks.clear();
+                    }
+                    gatherUncovered(uncoveredStacks, uncovered);
+                    // Keys that the previous query's uncovered mounts contributed but that are neither
+                    // mirrored nor uncovered any more would otherwise keep their old amount.
+                    for (var key : expiredUncovered) {
+                        if (accelerated.get(key) == 0) {
+                            out.remove(key);
+                        }
+                    }
+                    copyInto(accelerated, out);
+                    for (var entry : uncoveredStacks) {
+                        out.add(entry.getKey(), entry.getLongValue());
+                    }
+                    expiredUncovered.clear();
+                    for (var entry : uncoveredStacks) {
+                        expiredUncovered.add(entry.getKey());
+                    }
                 }
                 return;
             }
         }
 
+        // No mirror at all. The uncovered bookkeeping from the previous query has to be dropped with
+        // it, because it describes a merge that no longer happens.
+        uncoveredStacks = null;
+        expiredUncovered.clear();
         mountsInUse = true;
         try {
             for (var i : this.priorityInventory.values()) {
@@ -278,10 +311,50 @@ public class NetworkStorage implements MEStorage {
     }
 
     /**
+     * `out` may already have been cleared via KeyCounter#clear, which only clears the inner variant counters and keeps
+     * the primary-key entries. Setting absolute amounts is therefore correct regardless of the state `out` arrives in.
+     */
+    private static void copyInto(KeyCounter source, KeyCounter out) {
+        for (var entry : source) {
+            out.set(entry.getKey(), entry.getLongValue());
+        }
+    }
+
+    /**
+     * Reads the mounts the mirror could not reproduce and adds them to {@code out}.
+     * <p>
+     * They must not be added to the mirror's own counter: that one is handed out as a shared, read-only snapshot to
+     * consumers that cache it across ticks, so accumulating into it would count the uncovered mounts once per query.
+     */
+    public void gatherUncovered(KeyCounter out, Set<MEStorage> uncovered) {
+        mountsInUse = true;
+        try {
+            for (var invList : this.priorityInventory.values()) {
+                for (var inv : invList) {
+                    if (uncovered.contains(inv)) {
+                        inv.getAvailableStacks(out);
+                    }
+                }
+            }
+        } finally {
+            mountsInUse = false;
+        }
+    }
+
+    /**
+     * The mounts the mirror could not reproduce for the current query. Only valid until the next query, and only
+     * meaningful when {@link #getSharedAvailableStacks()} returned non-null.
+     */
+    public Set<MEStorage> getUncoveredMounts() {
+        var index = this.nativeIndex;
+        return index == null ? Collections.emptySet() : index.getUncoveredMounts();
+    }
+
+    /**
      * The native mirror's maintained aggregate, or {@code null} when the mirror is unavailable.
      * <p>
-     * The returned counter must be treated as read-only and must not be retained across ticks. It
-     * exists so a consumer that just needs the current content can avoid copying every entry.
+     * The returned counter must be treated as read-only and must not be retained across ticks. It exists so a consumer
+     * that just needs the current content can avoid copying every entry.
      */
     @Nullable
     public KeyCounter getSharedAvailableStacks() {
@@ -295,9 +368,9 @@ public class NetworkStorage implements MEStorage {
     /**
      * Network-total changes since {@code sinceRevision}, for consumers that stay in sync tick by tick.
      * <p>
-     * Returns {@code null} when the caller has to use {@link #getAvailableStacks(KeyCounter)} instead:
-     * the native mirror is unavailable, or the changes are not replayable from that revision (a mount
-     * changed, or the native side no longer retains it).
+     * Returns {@code null} when the caller has to use {@link #getAvailableStacks(KeyCounter)} instead: the native
+     * mirror is unavailable, or the changes are not replayable from that revision (a mount changed, or the native side
+     * no longer retains it).
      */
     @Nullable
     public RustStorageIndex.ChangeSet deltasSince(long sinceRevision) {

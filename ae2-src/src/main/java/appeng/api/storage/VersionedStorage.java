@@ -21,18 +21,17 @@ package appeng.api.storage;
 /**
  * Implemented by storages that can cheaply report whether their contents changed.
  * <p>
- * The optional native storage index uses this to decide which mounted inventories it has to re-read.
- * Without such a signal the index would have to re-read every cell every tick, which would cost more
- * than it saves.
+ * The optional native storage index uses this to decide which mounted inventories it has to re-read. Without such a
+ * signal the index would have to re-read every cell every tick, which would cost more than it saves.
  * <p>
- * Implementations must bump the version on <strong>every</strong> content mutation, including
- * mutations performed through {@link StorageCell} directly rather than through {@link MEStorage}.
- * Returning a constant is safe but defeats the optimisation for that storage.
+ * Implementations must bump the version on <strong>every</strong> content mutation, including mutations performed
+ * through {@link StorageCell} directly rather than through {@link MEStorage}. Returning a constant is safe but defeats
+ * the optimisation for that storage.
  */
 public interface VersionedStorage {
     /**
-     * @return a counter that changes whenever this storage's contents change. Any monotonic value
-     *         works; it is only ever compared for equality with the previously seen value.
+     * @return a counter that changes whenever this storage's contents change. Any monotonic value works; it is only
+     *         ever compared for equality with the previously seen value.
      */
     long storageVersion();
 }

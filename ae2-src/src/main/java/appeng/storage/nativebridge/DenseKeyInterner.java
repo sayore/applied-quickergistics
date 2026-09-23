@@ -29,10 +29,10 @@ import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
 /**
  * Assigns dense {@code int} ids to identity-distinct keys.
  * <p>
- * AE2 keys such as {@code AEItemKey} are canonical per item type, i.e. two lookups of the same item
- * return the same instance, so identity semantics are both correct and far cheaper than
- * {@code equals}/{@code hashCode}. Ids start at 0 and grow monotonically, which keeps them usable as
- * array indices in the native index and makes cell slices naturally close to sorted.
+ * AE2 keys such as {@code AEItemKey} are canonical per item type, i.e. two lookups of the same item return the same
+ * instance, so identity semantics are both correct and far cheaper than {@code equals}/{@code hashCode}. Ids start at 0
+ * and grow monotonically, which keeps them usable as array indices in the native index and makes cell slices naturally
+ * close to sorted.
  */
 public final class DenseKeyInterner<T> {
     private final Reference2IntMap<T> ids = new Reference2IntOpenHashMap<>();

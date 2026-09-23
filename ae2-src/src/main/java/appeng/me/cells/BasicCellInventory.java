@@ -71,8 +71,8 @@ public class BasicCellInventory implements StorageCell, VersionedStorage {
     private final boolean hasVoidUpgrade;
     private boolean isPersisted = true;
     /**
-     * Incremented on every content mutation. The optional native storage index uses this to detect
-     * which cells it has to re-read instead of re-reading all of them every tick.
+     * Incremented on every content mutation. The optional native storage index uses this to detect which cells it has
+     * to re-read instead of re-reading all of them every tick.
      */
     private long storageVersion;
 

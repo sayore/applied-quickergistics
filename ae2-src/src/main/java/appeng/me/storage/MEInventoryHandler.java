@@ -77,8 +77,8 @@ public class MEInventoryHandler extends DelegatingMEInventory {
     }
 
     /**
-     * True if {@link #getAvailableStacks(KeyCounter)} filters the reported contents, in which case
-     * they are not the same as the delegate's contents.
+     * True if {@link #getAvailableStacks(KeyCounter)} filters the reported contents, in which case they are not the
+     * same as the delegate's contents.
      * <p>
      * Used by {@link RustStorageIndex} to decide whether this handler is transparent.
      */
@@ -87,8 +87,7 @@ public class MEInventoryHandler extends DelegatingMEInventory {
     }
 
     /**
-     * Used by {@link RustStorageIndex} to decide whether this handler is transparent for the
-     * reported contents.
+     * Used by {@link RustStorageIndex} to decide whether this handler is transparent for the reported contents.
      */
     public boolean allowsExtraction() {
         return this.allowExtraction;

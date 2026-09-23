@@ -29,7 +29,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.neoforged.testframework.junit.EphemeralTestServerProvider;
 
@@ -46,17 +45,16 @@ import appeng.util.BootstrapMinecraft;
 /**
  * Measures the native storage mirror against a drive array of <em>real</em> AE2 cells.
  * <p>
- * The synthetic benchmark in {@code harness/} measures the same operations but against hand-written
- * storages, so it cannot see the cost of AE2's own wrappers
- * ({@link DriveWatcher} and {@link MEInventoryHandler}) or of
- * {@link BasicCellInventory}'s bookkeeping. This test builds the real thing from the item registry and
- * reports timings on stdout.
+ * The synthetic benchmark in {@code harness/} measures the same operations but against hand-written storages, so it
+ * cannot see the cost of AE2's own wrappers ({@link DriveWatcher} and {@link MEInventoryHandler}) or of
+ * {@link BasicCellInventory}'s bookkeeping. This test builds the real thing from the item registry and reports timings
+ * on stdout.
  * <p>
  * It runs headlessly through {@code @BootstrapMinecraft}, so it needs no GPU and no server boot.
  * <p>
- * The numbers are informational, not assertions: a virtual machine's timings say little about a real
- * server, and a hard threshold here would only make the suite flaky. What <em>is</em> asserted is that
- * both paths return the same aggregate, so a timing run can never silently measure a broken mirror.
+ * The numbers are informational, not assertions: a virtual machine's timings say little about a real server, and a hard
+ * threshold here would only make the suite flaky. What <em>is</em> asserted is that both paths return the same
+ * aggregate, so a timing run can never silently measure a broken mirror.
  */
 @BootstrapMinecraft
 @ExtendWith(EphemeralTestServerProvider.class)
@@ -65,6 +63,12 @@ class RealCellPerformanceTest {
         // The mirror is opt-in, and RustStorageIndex resolves that flag when its class is first
         // loaded - which the Minecraft bootstrap below can trigger. Set it before any of that runs.
         System.setProperty(RustStorageIndex.ENABLED_PROPERTY, "true");
+        // `-Dae2.native.incremental=true` on the Gradle command line does not reach the test JVM,
+        // so the same switch can be given as `-Dae2.perf.incremental=true`, which is copied over
+        // before RustStorageIndex is initialized.
+        if (Boolean.getBoolean("ae2.perf.incremental")) {
+            System.setProperty(RustStorageIndex.INCREMENTAL_PROPERTY, "true");
+        }
     }
 
     /** Real AE2 caps a cell at 63 types; using the cap keeps the drive realistic. */
@@ -118,9 +122,8 @@ class RealCellPerformanceTest {
     /**
      * Disables the mirror on a network, so the same class runs AE2's original code path.
      * <p>
-     * The enable flag is resolved once per JVM, so this is the only way to compare both paths in a
-     * single process without differences in JIT warmup, world state or machine load polluting the
-     * comparison.
+     * The enable flag is resolved once per JVM, so this is the only way to compare both paths in a single process
+     * without differences in JIT warmup, world state or machine load polluting the comparison.
      */
     private static NetworkStorage withoutMirror(NetworkStorage network) {
         try {
@@ -218,8 +221,8 @@ class RealCellPerformanceTest {
     }
 
     /**
-     * The steady state: nothing changes between queries, which is what a network that is not being
-     * written to looks like. This is the case the mirror should win outright.
+     * The steady state: nothing changes between queries, which is what a network that is not being written to looks
+     * like. This is the case the mirror should win outright.
      */
     @Test
     void measureSteadyStateAggregate() {
@@ -255,8 +258,8 @@ class RealCellPerformanceTest {
     }
 
     /**
-     * The realistic tick: one cell changes, then the inventory is refreshed. The mirror should only
-     * have to touch what changed, while the Java path re-reads every cell.
+     * The realistic tick: one cell changes, then the inventory is refreshed. The mirror should only have to touch what
+     * changed, while the Java path re-reads every cell.
      */
     @Test
     void measureTickWithOneChange() {
@@ -267,38 +270,73 @@ class RealCellPerformanceTest {
 
         System.out.printf("%n=== one cell changes per tick, %d cells, %d types ===%n",
                 fixture.mirrorMounts().size(), fixture.mirrorMounts().size() * TYPES_PER_CELL);
-        reportDiagnostics("baseline before phase", fixture.mirrorNetwork(), iterations);
 
         var liveKey = keys.get(0);
 
+        // The tick being measured is: one cell changes, then the consumer refreshes the aggregate.
+        // The change is a swap - one item in, one item out - so the network neither grows nor shrinks
+        // while the phase runs. Letting the network accumulate one item per iteration would instead
+        // measure the consumer's per-key copy growing with the network, which is what made an earlier
+        // version of this benchmark report the mirror as slower than plain Java.
         var javaOut = new KeyCounter();
         var javaLive = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) ((DriveWatcher) fixture
                 .javaMounts().get(0)).getDelegate());
         var javaMicros = time(i -> {
             javaLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            javaLive.extract(liveKey, 1, Actionable.MODULATE, src);
+            javaLive.insert(liveKey, 1, Actionable.MODULATE, src);
             javaOut.clear();
             fixture.javaNetwork().getAvailableStacks(javaOut);
         }, iterations);
 
+        var mirror = mirrorOf(fixture.mirrorNetwork());
         var adopted = fixture.mirrorNetwork().getSharedAvailableStacks();
         assertThat(adopted).as("mirror must be usable").isNotNull();
         var mirrorLive = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) ((DriveWatcher) fixture
                 .mirrorMounts().get(0)).getDelegate());
-        var mirrorMicros = time(i -> {
+        // Warm up before profiling and timing, so the numbers describe the steady state.
+        for (var i = 0; i < iterations / 4; i++) {
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.extract(liveKey, 1, Actionable.MODULATE, src);
             mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
             fixture.mirrorNetwork().getAvailableStacks(adopted);
-        }, iterations);
+        }
+        mirror.resetProfiling();
+
+        var mirrorStart = System.nanoTime();
+        for (var i = 0; i < iterations; i++) {
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.extract(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            fixture.mirrorNetwork().getAvailableStacks(adopted);
+        }
+        var mirrorMicros = (System.nanoTime() - mirrorStart) / 1000.0 / iterations;
 
         report("one change, then aggregate", "java", (long) (javaMicros * 1000 * iterations), iterations);
         report("one change, then aggregate", "mirror", (long) (mirrorMicros * 1000 * iterations),
                 iterations);
         System.out.printf("  %-30s %-8s %10.2fx%n", "", "speedup", javaMicros / mirrorMicros);
+        System.out.println("  " + mirror.profilingSummary(iterations));
         reportDiagnostics("with changes", fixture.mirrorNetwork(), iterations);
+
+        // The same tick, but with the consumer owning its own counter. That shape pays one copy of the
+        // aggregate, which the mirror cannot remove for it.
+        var ownedOut = new KeyCounter();
+        mirror.resetProfiling();
+        var ownedMicros = time(i -> {
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.extract(liveKey, 1, Actionable.MODULATE, src);
+            mirrorLive.insert(liveKey, 1, Actionable.MODULATE, src);
+            fixture.mirrorNetwork().getAvailableStacks(ownedOut);
+        }, iterations);
+        report("one change, caller-owned counter", "mirror", (long) (ownedMicros * 1000 * iterations),
+                iterations);
+        System.out.println("  " + mirror.profilingSummary(iterations));
     }
 
     /**
-     * Entry-wise comparison. {@code Map.equals} cannot be used: the maps are identity maps and the
-     * values are boxed longs.
+     * Entry-wise comparison. {@code Map.equals} cannot be used: the maps are identity maps and the values are boxed
+     * longs.
      */
     private static void assertSameContents(KeyCounter actual, KeyCounter expected) {
         assertThat(actual.size()).isEqualTo(expected.size());

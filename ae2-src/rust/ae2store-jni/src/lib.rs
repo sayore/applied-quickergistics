@@ -39,7 +39,10 @@ fn long_array(env: &mut JNIEnv, values: &[i64]) -> jlongArray {
         Ok(arr) => {
             if !values.is_empty() && env.set_long_array_region(&arr, 0, values).is_err() {
                 env.exception_clear().ok();
-                return env.new_long_array(0).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut());
+                return env
+                    .new_long_array(0)
+                    .map(|a| a.into_raw())
+                    .unwrap_or(std::ptr::null_mut());
             }
             arr.into_raw()
         }
@@ -229,7 +232,8 @@ pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_applyCell
     delta: jlong,
 ) {
     if let Some(h) = unsafe { handle_ref(handle) } {
-        h.index.apply_cell_delta(cell_id as u32, key_id as u32, delta);
+        h.index
+            .apply_cell_delta(cell_id as u32, key_id as u32, delta);
     }
 }
 
@@ -356,6 +360,18 @@ pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_deltasSin
 }
 
 /// The revision the network totals are currently at.
+#[no_mangle]
+pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_pendingDeltaCount(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jlong {
+    match unsafe { handle_ref(handle) } {
+        Some(h) => h.index.pending_delta_count() as jlong,
+        None => 0,
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_deltaRevision(
     _env: JNIEnv,

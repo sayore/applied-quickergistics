@@ -37,37 +37,36 @@ import appeng.storage.nativebridge.NativeNetworkIndex;
 /**
  * Optional native (Rust) mirror of a {@link NetworkStorage}'s contents.
  * <p>
- * The index is a read accelerator, never a source of truth: {@link NetworkStorage} keeps its own
- * mounts and stays fully functional without it, and {@link #isEnabled()} is false whenever the native
- * library is unavailable or the feature was switched off. Only {@code getAvailableStacks} is served
- * from the mirror; insert/extract keep their original implementation so that all filtering,
- * prioritisation and side effects stay on the Java side.
+ * The index is a read accelerator, never a source of truth: {@link NetworkStorage} keeps its own mounts and stays fully
+ * functional without it, and {@link #isEnabled()} is false whenever the native library is unavailable or the feature
+ * was switched off. Only {@code getAvailableStacks} is served from the mirror; insert/extract keep their original
+ * implementation so that all filtering, prioritisation and side effects stay on the Java side.
  * <p>
  * # How the mirror stays in sync
  * <p>
- * A mounted storage can be mutated behind {@link NetworkStorage}'s back (an IO port fills a cell, a
- * storage bus observes an external inventory, ...). Re-reading every cell every tick would cost more
- * than the native index saves, so storages implement {@link VersionedStorage} and only those whose
- * version changed are pushed across the JNI boundary.
+ * A mounted storage can be mutated behind {@link NetworkStorage}'s back (an IO port fills a cell, a storage bus
+ * observes an external inventory, ...). Re-reading every cell every tick would cost more than the native index saves,
+ * so storages implement {@link VersionedStorage} and only those whose version changed are pushed across the JNI
+ * boundary.
  * <p>
  * # Threading
  * <p>
  * Instances belong to the server thread that owns the network. Crafting calculations read
- * {@code IStorageService#getCachedInventory()} from a separate thread rather than a live network
- * inventory, so they never touch this class.
+ * {@code IStorageService#getCachedInventory()} from a separate thread rather than a live network inventory, so they
+ * never touch this class.
  */
 public final class RustStorageIndex {
     /**
      * System property that turns the mirror off: {@code -Dae2.native.index=false}.
      * <p>
      * Enabled by default when the native library loads. Measured against real AE2 cells
-     * ({@code appeng.me.storage.RealCellPerformanceTest}), the aggregate query is faster than AE2's
-     * Java path at every network size tested, including a single cell: 14x for one cell, 161x for
-     * four, 149x for fourteen, 473x for twenty-nine, and 3.6x when one cell changes every tick.
+     * ({@code appeng.me.storage.RealCellPerformanceTest}), the aggregate query is faster than AE2's Java path at every
+     * network size tested, including a single cell: 6-10x for one cell, 30-166x for four, 230-396x for fourteen,
+     * 475-533x for twenty-nine, and 4.1-5.2x when one cell changes every tick.
      * <p>
-     * What made it slower before is fixed: the aggregate counter is maintained instead of rebuilt per
-     * query, the caller's counter is handed back instead of copied into, and the gap in the change log
-     * is found by binary search instead of by scanning every retained entry.
+     * What made it slower before is fixed: the aggregate counter is maintained instead of rebuilt per query, the
+     * caller's counter is handed back instead of copied into, and the gap in the change log is found by binary search
+     * instead of by scanning every retained entry.
      */
     public static final String ENABLED_PROPERTY = "ae2.native.index";
 
@@ -85,8 +84,8 @@ public final class RustStorageIndex {
     /** Scratch buffer for a cell's amounts, reused between pushes. */
     private long[] amountScratch = new long[64];
     /**
-     * Set by {@link #mount} and {@link #unmount}. A delta consumer cannot apply changes across a
-     * mount change, so it has to do a full refresh instead.
+     * Set by {@link #mount} and {@link #unmount}. A delta consumer cannot apply changes across a mount change, so it
+     * has to do a full refresh instead.
      */
     private boolean mountsChanged;
 
@@ -95,8 +94,7 @@ public final class RustStorageIndex {
     }
 
     /**
-     * @return a new index, or {@code null} if the accelerator is disabled or the native library is
-     *         unavailable.
+     * @return a new index, or {@code null} if the accelerator is disabled or the native library is unavailable.
      */
     @Nullable
     public static RustStorageIndex createIfAvailable() {
@@ -127,8 +125,8 @@ public final class RustStorageIndex {
     }
 
     /**
-     * Registers a mounted storage. Storages that cannot be mirrored are ignored and cause the mirror
-     * to be unusable for this network until they are unmounted.
+     * Registers a mounted storage. Storages that cannot be mirrored are ignored and cause the mirror to be unusable for
+     * this network until they are unmounted.
      */
     public void mount(MEStorage storage, int priority) {
         if (cells.containsKey(storage)) {
@@ -164,17 +162,16 @@ public final class RustStorageIndex {
     /**
      * Mirrors all changed mounts and returns the aggregate.
      *
-     * @return the aggregate, or {@code null} if a mount cannot be mirrored, in which case the caller
-     *         must use its own code path.
+     * @return the aggregate, or {@code null} if a mount cannot be mirrored, in which case the caller must use its own
+     *         code path.
      */
     /**
      * The aggregate, maintained incrementally instead of rebuilt per query.
      * <p>
-     * Building a {@link KeyCounter} from the native result costs an order of magnitude more than the
-     * native aggregate itself (measured at ~180 us versus ~11 us on a 14-cell drive), because every
-     * entry has to be resolved back to an {@link AEKey} and inserted into the counter's nested maps.
-     * That work is avoidable: the counter is kept up to date from the change log, so a query only has
-     * to look at what actually changed since the previous one.
+     * Building a {@link KeyCounter} from the native result costs an order of magnitude more than the native aggregate
+     * itself (measured at ~180 us versus ~11 us on a 14-cell drive), because every entry has to be resolved back to an
+     * {@link AEKey} and inserted into the counter's nested maps. That work is avoidable: the counter is kept up to date
+     * from the change log, so a query only has to look at what actually changed since the previous one.
      * <p>
      * May be {@code null} before the first successful sync.
      */
@@ -185,13 +182,13 @@ public final class RustStorageIndex {
      */
     private long maintainedRevision = -1;
     /**
-     * Native revision at which every mount was last checked for changes, or {@code -1} to force a
-     * rescan. Nothing can have changed while the revision is unchanged.
+     * Native revision at which every mount was last checked for changes, or {@code -1} to force a rescan. Nothing can
+     * have changed while the revision is unchanged.
      */
     private long lastScannedRevision = -1;
     /**
-     * Set when a mount was added or removed, which the native revision cannot express. A forced
-     * rescan is what makes an out-of-band mutation visible again.
+     * Set when a mount was added or removed, which the native revision cannot express. A forced rescan is what makes an
+     * out-of-band mutation visible again.
      */
     private boolean rescanWanted = true;
     /**
@@ -199,8 +196,9 @@ public final class RustStorageIndex {
      */
     public final long[] diag = new long[4];
     /** Mounts the mirror cannot reproduce, so the caller has to read them in Java. */
-    private final Set<MEStorage> uncovered =
-            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private final Set<MEStorage> uncovered = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    /** Set by the last {@link #sync()} when {@link #uncovered} is not empty. */
+    private boolean uncoveredVisible;
 
     /**
      * Why a mount could not be mirrored.
@@ -217,9 +215,9 @@ public final class RustStorageIndex {
     /**
      * Reports which mounts are actually mirrored and which are excluded, and why.
      * <p>
-     * This matters more than it looks: a single excluded mount currently disables the whole mirror
-     * for that network, because the aggregate would otherwise be incomplete. Without this report that
-     * degradation is invisible - the network simply runs on the Java path and looks healthy.
+     * This matters more than it looks. An excluded mount used to disable the whole mirror for that network, silently -
+     * the network simply ran on the Java path and looked healthy. Excluded mounts are now read in Java on top of the
+     * mirror's aggregate, so this report answers "how much of this network is actually accelerated".
      *
      * @return a summary for diagnostics and tests
      */
@@ -270,11 +268,15 @@ public final class RustStorageIndex {
     /**
      * The mirror's own aggregate counter, brought up to date with the mounts.
      * <p>
-     * Unlike {@link #getAvailableStacks()}, which materialises a fresh counter for a caller that wants
-     * to own it, this hands out the counter the mirror maintains. It is meant to be read and iterated,
-     * not modified; a caller that needs to change it must copy the entries it cares about.
+     * Unlike a fresh counter built for a caller that wants to own it, this hands out the counter the mirror maintains.
+     * It is meant to be read and iterated, not modified; a caller that needs to change it must copy the entries it
+     * cares about.
+     * <p>
+     * When {@link #hasUncoveredMounts()} is true, the returned counter holds only the mounts the mirror could
+     * reproduce. It is still worth using - reading those in Java instead is what makes an unmirrorable mount cost the
+     * whole network - but the caller has to add the uncovered mounts on top before exposing the result.
      *
-     * @return the aggregate, or {@code null} when the mirror cannot be used.
+     * @return the aggregate, or {@code null} when the mirror cannot be used at all.
      */
     @Nullable
     public KeyCounter getSharedAvailableStacks() {
@@ -289,15 +291,12 @@ public final class RustStorageIndex {
         if (!sync()) {
             return null;
         }
-        if (maintainedCounter == null) {
-            return null;
-        }
         return maintainedCounter;
     }
 
     /**
-     * Mirrors all changed mounts and returns the aggregate restricted to the given key ids. The ids
-     * are the native ids of this index, i.e. {@link #interner()}.
+     * Mirrors all changed mounts and returns the aggregate restricted to the given key ids. The ids are the native ids
+     * of this index, i.e. {@link #interner()}.
      */
     @Nullable
     public KeyCounter getAvailableStacks(int[] filterKeyIds) {
@@ -321,9 +320,9 @@ public final class RustStorageIndex {
     /**
      * Mirrors all changed mounts and returns the amounts of the given keys.
      * <p>
-     * This is the shape of a terminal search or a "can I craft this?" check: few keys against the
-     * whole network. The native side answers it from its reverse index, so it only visits the cells
-     * that actually hold each key instead of every mount.
+     * This is the shape of a terminal search or a "can I craft this?" check: few keys against the whole network. The
+     * native side answers it from its reverse index, so it only visits the cells that actually hold each key instead of
+     * every mount.
      *
      * @return the amounts in the order of {@code keys}, or {@code null} if the mirror cannot be used.
      */
@@ -379,12 +378,22 @@ public final class RustStorageIndex {
     /**
      * Pushes every mount whose contents changed.
      *
-     * @return false if any mounted storage cannot be mirrored, meaning the mirror is stale and must
-     *         not be used.
+     * @return false if any mounted storage cannot be mirrored, meaning the mirror is stale and must not be used.
      */
     private boolean sync() {
+        var syncStart = System.nanoTime();
+        try {
+            return syncInner();
+        } finally {
+            syncNanos += System.nanoTime() - syncStart;
+            syncCalls++;
+        }
+    }
+
+    private boolean syncInner() {
         var revisionBefore = index.deltaRevision();
         uncovered.clear();
+        uncoveredVisible = false;
         for (var i = 0; i < pending.size(); i++) {
             var m = pending.get(i);
             if (!push(m)) {
@@ -410,14 +419,23 @@ public final class RustStorageIndex {
                 uncovered.add(mounted.storage);
             }
         }
-        if (covered) {
-            return updateMaintainedCounter(revisionBefore);
+        if (!covered) {
+            // A mount that cannot be mirrored does not invalidate the mirror: the counter keeps the
+            // sum of the mounts that *can* be reproduced, and the caller adds the excluded mounts on
+            // top. Before this was per-mount, a single unmirrorable storage (a storage bus, a filtered
+            // handler) forced the entire network back onto the Java path, which threw away the
+            // acceleration for every mirrored cell as well.
+            uncoveredVisible = true;
         }
-        // The mirror's own aggregate has to stay the sum of the cells it could reproduce, so it is
-        // dropped rather than mixed with totals the caller then adds again in Java.
-        maintainedCounter = null;
-        maintainedRevision = -1;
-        return true;
+        return updateMaintainedCounter(revisionBefore);
+    }
+
+    /**
+     * Whether the last {@link #sync()} could not reproduce every mount, meaning the caller has to add the mounts
+     * returned by {@link #getUncoveredMounts()} itself.
+     */
+    public boolean hasUncoveredMounts() {
+        return uncoveredVisible;
     }
 
     /**
@@ -437,7 +455,9 @@ public final class RustStorageIndex {
         var revisionAfter = index.deltaRevision();
         if (maintainedCounter == null || maintainedRevision != revisionBefore) {
             diag[0]++;
-            // No usable baseline: read the whole aggregate once and adopt the counter.
+            // No usable baseline: read the whole aggregate once and adopt the counter. Rebuilding from
+            // scratch is also what makes the counter usable as a full snapshot for a caller: it must
+            // not keep a key that no query writes any more, and in partial mode every sync lands here.
             maintainedCounter = toCounter(index.available());
             maintainedRevision = index.deltaRevision();
             return true;
@@ -454,6 +474,7 @@ public final class RustStorageIndex {
             return true;
         }
         diag[1]++;
+        var diagStart = System.nanoTime();
         var keys = interner.keys();
         for (var change : changes.changes()) {
             var key = keys.get(change.keyId());
@@ -464,7 +485,55 @@ public final class RustStorageIndex {
             }
         }
         maintainedRevision = changes.revision();
+        deltaApplyNanos += System.nanoTime() - diagStart;
+        deltaChangeCount += changes.changes().length;
+        deltaCallCount++;
         return true;
+    }
+
+    /** Diagnostic: nanoseconds spent applying deltas to {@link #maintainedCounter}. */
+    public long deltaApplyNanos;
+    /** Diagnostic: total changes applied and number of delta applications. */
+    public long deltaChangeCount;
+    public long deltaCallCount;
+    /** Diagnostic: how often a mount's contents were re-read because its version moved. */
+    public long cellReads;
+    /** Diagnostic: nanos spent inside {@link #sync()}, and how often it ran. */
+    public long syncNanos;
+    public long syncCalls;
+    /** Diagnostic: nanos inside {@link #push(MountedCell)}, split by phase. */
+    public long profRead;
+    public long profIntern;
+    public long profPush;
+
+    /** Zeroes the timing diagnostics so a measurement can attribute time to a single phase. */
+    public void resetProfiling() {
+        deltaApplyNanos = 0;
+        deltaChangeCount = 0;
+        deltaCallCount = 0;
+        cellReads = 0;
+        syncNanos = 0;
+        syncCalls = 0;
+        profRead = 0;
+        profIntern = 0;
+        profPush = 0;
+    }
+
+    /** Human-readable profiling summary for {@link #resetProfiling()} measurements. */
+    public String profilingSummary(long iterations) {
+        if (iterations <= 0) {
+            return "no iterations";
+        }
+        return String.format(java.util.Locale.ROOT,
+                "sync=%.3f us/op (%.2f calls/op), cellRead=%.3f us/op, "
+                        + "deltaApply=%.3f us/op (%.2f changes/op)",
+                syncNanos / 1000.0 / iterations, syncCalls / (double) iterations,
+                cellReads / (double) iterations, deltaApplyNanos / 1000.0 / iterations,
+                deltaChangeCount / (double) iterations)
+                + String.format(java.util.Locale.ROOT,
+                        " [push phases: read=%.3f intern=%.3f jni=%.3f us/op]",
+                        profRead / 1000.0 / iterations, profIntern / 1000.0 / iterations,
+                        profPush / 1000.0 / iterations);
     }
 
     /**
@@ -482,8 +551,12 @@ public final class RustStorageIndex {
         diag[3]++;
         mounted.version = version;
 
+        cellReads++;
+        var t0 = System.nanoTime();
         var contents = mounted.storage.getAvailableStacks();
         var count = contents.size();
+        profRead += System.nanoTime() - t0;
+        var t1 = System.nanoTime();
         if (idScratch.length < count) {
             idScratch = new long[Math.max(count, idScratch.length * 2)];
             amountScratch = new long[Math.max(count, amountScratch.length * 2)];
@@ -497,25 +570,26 @@ public final class RustStorageIndex {
         // The scratch buffers are reused between cells and the native side only sees
         // `amountScratch.length` entries, so the tail of a previous, larger cell has to be cleared.
         // Leaving stale ids behind would resurrect a previous cell's contents.
+        profIntern += System.nanoTime() - t1;
+        var t2 = System.nanoTime();
         java.util.Arrays.fill(idScratch, i, idScratch.length, 0L);
         java.util.Arrays.fill(amountScratch, i, amountScratch.length, 0L);
         // Interning may have assigned new ids, so make sure the native key space covers them.
         index.ensureKeyCapacity(interner.size());
         index.pushCell(mounted.cellId, interner.size(), idScratch, amountScratch);
+        profPush += System.nanoTime() - t2;
         mounted.pushed = true;
         mounted.keyCount = i;
         return true;
     }
 
     /**
-     * Finds the {@link VersionedStorage} backing a mount, or {@code null} if the mount cannot be
-     * mirrored.
+     * Finds the {@link VersionedStorage} backing a mount, or {@code null} if the mount cannot be mirrored.
      * <p>
-     * Wrappers are transparent for {@code getAvailableStacks} as long as they do not filter the
-     * reported contents and allow extraction; when they do filter, the mirror would over-report and
-     * the mount is rejected. Note that the check must be against {@link DelegatingMEInventory}, not
-     * {@link MEInventoryHandler}: AE2's own drives mount a {@code DriveWatcher}, which is a subclass
-     * that adds status tracking on top of the handler.
+     * Wrappers are transparent for {@code getAvailableStacks} as long as they do not filter the reported contents and
+     * allow extraction; when they do filter, the mirror would over-report and the mount is rejected. Note that the
+     * check must be against {@link DelegatingMEInventory}, not {@link MEInventoryHandler}: AE2's own drives mount a
+     * {@code DriveWatcher}, which is a subclass that adds status tracking on top of the handler.
      */
     @Nullable
     private static VersionedStorage resolveVersioned(MEStorage storage) {
@@ -550,12 +624,11 @@ public final class RustStorageIndex {
     /**
      * Whether the incremental tick refresh may be used.
      * <p>
-     * Off by default on purpose. The change log itself is complete and verified, but the mirror
-     * currently reports too many changes: it records roughly 350 changes per actual mutation on a
-     * 400-cell network, because a cell whose version changed is re-pushed and its whole content is
-     * subtracted and re-added. Applying that many changes costs more than one full aggregate, so the
-     * path stays disabled until the mirror's push behaviour is narrowed. See the crate documentation
-     * for the measurement.
+     * Off by default on purpose. The change log itself is complete and verified, but the mirror currently reports too
+     * many changes: it records roughly 350 changes per actual mutation on a 400-cell network, because a cell whose
+     * version changed is re-pushed and its whole content is subtracted and re-added. Applying that many changes costs
+     * more than one full aggregate, so the path stays disabled until the mirror's push behaviour is narrowed. See the
+     * crate documentation for the measurement.
      */
     public static final String INCREMENTAL_PROPERTY = "ae2.native.incremental";
 
@@ -566,12 +639,12 @@ public final class RustStorageIndex {
     /**
      * Mirrors all changed mounts and returns the network-total changes since {@code sinceRevision}.
      * <p>
-     * This is the per-tick path: a consumer that stayed in sync receives only the keys that actually
-     * changed, instead of an aggregate of every stored type.
+     * This is the per-tick path: a consumer that stayed in sync receives only the keys that actually changed, instead
+     * of an aggregate of every stored type.
      *
-     * @return the changes, or {@code null} when the caller has to fall back to a full
-     *         {@link #getAvailableStacks()}. That happens when the mount set changed, so the deltas
-     *         cannot describe it, and when the native side no longer retains that revision.
+     * @return the changes, or {@code null} when the caller has to fall back to a full {@link #getAvailableStacks()}.
+     *         That happens when the mount set changed, so the deltas cannot describe it, and when the native side no
+     *         longer retains that revision.
      */
     @Nullable
     public ChangeSet deltasSince(long sinceRevision) {
@@ -580,6 +653,12 @@ public final class RustStorageIndex {
         }
         if (mountsChanged) {
             mountsChanged = false;
+            return null;
+        }
+        if (uncoveredVisible) {
+            // The change log only describes the mounts the mirror reproduced. Returning it here would
+            // silently omit every change to an excluded mount, so the caller is sent to the full
+            // refresh, which reads the excluded mounts in Java.
             return null;
         }
         var nativeChanges = index.deltasSince(sinceRevision);
@@ -592,6 +671,11 @@ public final class RustStorageIndex {
             changes.add(new KeyChange(keys.get(change.keyId()), change.oldTotal(), change.newTotal()));
         }
         return new ChangeSet(nativeChanges.revision(), changes);
+    }
+
+    /** Diagnostic: how many retained changes the native log currently holds. */
+    public int pendingDeltaCount() {
+        return index.pendingDeltaCount();
     }
 
     /**

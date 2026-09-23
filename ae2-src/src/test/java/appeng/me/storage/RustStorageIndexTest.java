@@ -30,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import it.unimi.dsi.fastutil.objects.Object2LongMap;
 import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap;
 
+import appeng.api.config.Actionable;
 import appeng.api.stacks.AEKey;
 import appeng.api.stacks.AEKeyType;
 import appeng.api.stacks.KeyCounter;
@@ -37,15 +38,15 @@ import appeng.api.storage.MEStorage;
 import appeng.api.storage.VersionedStorage;
 
 /**
- * Verifies that the optional native storage mirror produces exactly the same aggregate as AE2's Java
- * implementation, and that it stays in sync across mutations, mounts and unmounts.
+ * Verifies that the optional native storage mirror produces exactly the same aggregate as AE2's Java implementation,
+ * and that it stays in sync across mutations, mounts and unmounts.
  * <p>
  * No Minecraft bootstrap is required: only the aggregate read path is exercised.
  */
 class RustStorageIndexTest {
     /**
-     * A minimal, Minecraft-free stand-in for a storage cell. AE2's real cells are
-     * {@link VersionedStorage}; this one tracks a version counter the same way.
+     * A minimal, Minecraft-free stand-in for a storage cell. AE2's real cells are {@link VersionedStorage}; this one
+     * tracks a version counter the same way.
      */
     static class FakeStorage implements MEStorage, VersionedStorage {
         final Object2LongMap<AEKey> contents = new Object2LongOpenHashMap<>();
@@ -96,10 +97,9 @@ class RustStorageIndexTest {
     }
 
     /**
-     * A stand-in key with the identity semantics of AE2's canonical keys: two lookups of the same
-     * resource return the same instance, and {@code getPrimaryKey()} is the key itself. Only the
-     * methods the storage path actually uses are implemented; the rest throw, because a test that
-     * reaches them would be testing something else.
+     * A stand-in key with the identity semantics of AE2's canonical keys: two lookups of the same resource return the
+     * same instance, and {@code getPrimaryKey()} is the key itself. Only the methods the storage path actually uses are
+     * implemented; the rest throw, because a test that reaches them would be testing something else.
      */
     static final class FakeKey extends AEKey {
         private final int id;
@@ -289,7 +289,7 @@ class RustStorageIndexTest {
     }
 
     @Test
-    void unversionedStorageFallsBackToJavaImplementation() {
+    void unversionedStorageIsReadInJavaWhileTheRestStaysMirrored() {
         var versioned = new FakeStorage();
         var unversioned = new UnversionedStorage();
         var keys = keys(4);
@@ -300,12 +300,62 @@ class RustStorageIndexTest {
         network.mount(0, versioned);
         network.mount(1, unversioned);
 
-        // The mirror cannot track the unversioned storage, so it must not be used; the Java path
-        // still has to produce the full, correct aggregate.
+        // The mirror cannot track the unversioned storage, so that one mount has to be read in Java.
+        // The mirrored mount must not be dragged onto the Java path with it: the mirror has to stay
+        // available, with the uncovered mount listed separately so the caller can add it.
         assertMatchesReference(network, List.of(versioned, unversioned));
+        assertThat(network.getSharedAvailableStacks())
+                .as("the mirrored mount stays available despite the unversioned mount")
+                .isNotNull();
+        // Querying twice must not count the uncovered mount twice. This is why the uncovered mounts
+        // are gathered into a caller-owned counter instead of the mirror's shared one.
+        var twice = new KeyCounter();
+        network.getAvailableStacks(twice);
+        network.getAvailableStacks(twice);
+        assertThat(toMap(twice))
+                .as("repeated queries must not accumulate the uncovered mount")
+                .containsEntry(keys.get(1), 3L);
 
+        // A change to the uncovered mount has to show up even though it produces no delta.
         unversioned.contents.put(keys.get(2), 11);
         assertMatchesReference(network, List.of(versioned, unversioned));
+
+        // A change to the covered mount has to show up as well while the uncovered one is present.
+        // The native side only advances its revision when a total actually changes, so bumping the
+        // version without changing the content must not leave the mirror reading a stale total.
+        versioned.set(keys.get(0), 2);
+        assertMatchesReference(network, List.of(versioned, unversioned));
+        versioned.set(keys.get(0), 7);
+        assertMatchesReference(network, List.of(versioned, unversioned));
+
+        // The incremental path would describe only the mirrored mounts, so it must refuse to serve.
+        assertThat(network.deltasSince(network.revision()))
+                .as("deltas must not omit an uncovered mount's changes")
+                .isNull();
+    }
+
+    /**
+     * Partial coverage means an excluded mount must not contribute to the mirrored total, otherwise the caller would
+     * count it twice. This is exactly what a filtered storage bus causes.
+     */
+    @Test
+    void excludedMountIsAddedExactlyOnce() {
+        var versioned = new FakeStorage();
+        var filtered = new MEInventoryHandler(new FakeStorage());
+        filtered.setPartitionList(new appeng.util.prioritylist.DefaultPriorityList());
+        filtered.setExtractFiltering(true, true);
+
+        var keys = keys(3);
+        versioned.set(keys.get(0), 5);
+        filtered.insert(keys.get(1), 13, Actionable.MODULATE, null);
+
+        var network = new NetworkStorage();
+        network.mount(0, versioned);
+        network.mount(3, filtered);
+
+        for (var round = 0; round < 3; round++) {
+            assertMatchesReference(network, List.of(versioned, filtered));
+        }
     }
 
     @Test

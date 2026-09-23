@@ -49,11 +49,11 @@ public final class KeyCounter implements Iterable<Object2LongMap.Entry<AEKey>> {
     /**
      * Set once a fuzzy lookup has been requested on this counter.
      * <p>
-     * A {@link VariantCounter.FuzzyVariantMap} indexes its keys in an AVL tree, which makes every
-     * insertion O(log n) instead of amortised O(1). The fuzzy index is only needed by the few callers
-     * that actually search by durability, but indexing by key cannot be switched to it later without
-     * rebuilding the tree. Deferring that switch until a fuzzy search is asked for therefore keeps
-     * the common counting path cheap while still guaranteeing that a fuzzy search is exact.
+     * A {@link VariantCounter.FuzzyVariantMap} indexes its keys in an AVL tree, which makes every insertion O(log n)
+     * instead of amortised O(1). The fuzzy index is only needed by the few callers that actually search by durability,
+     * but indexing by key cannot be switched to it later without rebuilding the tree. Deferring that switch until a
+     * fuzzy search is asked for therefore keeps the common counting path cheap while still guaranteeing that a fuzzy
+     * search is exact.
      */
     private boolean fuzzyLookupRequested;
 

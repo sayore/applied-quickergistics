@@ -23,15 +23,14 @@ import org.jetbrains.annotations.Nullable;
 /**
  * Thin, allocation-conscious wrapper around the {@code ae2store} Rust network index.
  * <p>
- * This class is deliberately free of any Minecraft or AE2 API dependency so it can be unit tested and
- * benchmarked in a plain JVM. The AE2 integration lives in {@code appeng.me.storage.rust}.
+ * This class is deliberately free of any Minecraft or AE2 API dependency so it can be unit tested and benchmarked in a
+ * plain JVM. The AE2 integration lives in {@code appeng.me.storage.rust}.
  * <p>
- * Instances are <strong>not</strong> thread-safe, matching the threading rules of the Minecraft
- * server thread that owns them.
+ * Instances are <strong>not</strong> thread-safe, matching the threading rules of the Minecraft server thread that owns
+ * them.
  * <p>
- * The native object is never allowed to hold Java references: keys are identified by dense
- * {@code int} ids that the caller assigns. This makes the handle a plain owned Rust allocation with
- * no GC bookkeeping.
+ * The native object is never allowed to hold Java references: keys are identified by dense {@code int} ids that the
+ * caller assigns. This makes the handle a plain owned Rust allocation with no GC bookkeeping.
  */
 public final class NativeNetworkIndex implements AutoCloseable {
     private static final int STATS_CELL_COUNT = 0;
@@ -191,8 +190,8 @@ public final class NativeNetworkIndex implements AutoCloseable {
     /**
      * Changes to network totals since {@code sinceRevision}.
      *
-     * @return the changes, or {@code null} when that range is no longer replayable and the caller has
-     *         to recompute the aggregate instead.
+     * @return the changes, or {@code null} when that range is no longer replayable and the caller has to recompute the
+     *         aggregate instead.
      */
     @Nullable
     public ChangeSet deltasSince(long sinceRevision) {
@@ -217,6 +216,12 @@ public final class NativeNetworkIndex implements AutoCloseable {
     public long[] pushStats() {
         requireOpen();
         return NativeBindings.pushStats(handle);
+    }
+
+    /** Diagnostic: the number of changes the native log currently retains. */
+    public int pendingDeltaCount() {
+        requireOpen();
+        return (int) NativeBindings.pendingDeltaCount(handle);
     }
 
     /**

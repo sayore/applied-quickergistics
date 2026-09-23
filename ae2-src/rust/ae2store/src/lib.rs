@@ -459,6 +459,15 @@ pub struct NetworkIndex {
     postings: Vec<Vec<u32>>,
 }
 
+/// Amount a sorted (id, amount) list holds for `id`, or 0.
+#[inline]
+fn amount_of(entries: &[(u32, i64)], id: u32) -> i64 {
+    match entries.binary_search_by_key(&id, |e| e.0) {
+        Ok(i) => entries[i].1,
+        Err(_) => 0,
+    }
+}
+
 impl NetworkIndex {
     pub fn new() -> Self {
         Self {
@@ -639,9 +648,11 @@ impl NetworkIndex {
                 .map(|i| (cell.ids[i], cell.amounts[i]))
                 .collect()
         };
-        for &(id, amount) in &old {
-            self.add_total_for_cell(id, -amount, cell_id);
-        }
+        // Only the totals that actually move are touched. Subtracting and re-adding the whole cell
+        // would record a change for every key in it, and a consumer applying that log pays for the
+        // entire cell instead of for the one key that changed - which is what made the incremental
+        // refresh slower than a full rebuild and kept the cell that changed as expensive as the whole
+        // network.
         self.cells[slot].set_contents(entries);
         let new: Vec<(u32, i64)> = {
             let cell = &self.cells[slot];
@@ -649,8 +660,26 @@ impl NetworkIndex {
                 .map(|i| (cell.ids[i], cell.amounts[i]))
                 .collect()
         };
-        for &(id, amount) in &new {
-            self.add_total_for_cell(id, amount, cell_id);
+        // A total moves by the difference of the amounts the cell holds before and after. Walking the
+        // union of both key lists instead of subtracting the whole cell and adding it back is what
+        // keeps the change log proportional to what actually changed: one key per mutation instead of
+        // every key in the cell, which is what made the incremental refresh lose to a full rebuild.
+        //
+        // The walk reads both lists through binary search rather than merging them, because the cost
+        // is dominated by the recorded changes, not by the ~63 lookups a cell does.
+        let mut touched: Vec<u32> = old
+            .iter()
+            .map(|e| e.0)
+            .chain(new.iter().map(|e| e.0))
+            .collect();
+        touched.sort_unstable();
+        touched.dedup();
+        for id in touched {
+            let before = amount_of(&old, id);
+            let after = amount_of(&new, id);
+            if before != after {
+                self.add_total_for_cell(id, after - before, cell_id);
+            }
         }
         // Both lists are sorted by id, so the posting lists only need the symmetric difference.
         let slot_id = slot as u32;
@@ -841,25 +870,18 @@ impl NetworkIndex {
 
     /// Records a change to a network total.
     ///
-    /// Entries are not merged across revisions. Merging looks attractive for the one-item-at-a-time
-    /// traffic of buses, but it would make a consumer that fell behind replay an entry whose
-    /// `old_total` does not match its baseline, silently writing a wrong total. Retained revisions
-    /// therefore stay dense, and each consumer receives exactly the revisions it missed.
+    /// Entries are not merged across revisions, and every change gets its own revision even when it
+    /// exactly undoes the one before it. Both properties are load-bearing: the log is dense, so the
+    /// first entry a consumer needs always sits at `since_revision + 1`, and each entry's
+    /// `old_total` matches the baseline of every consumer that replays it.
     ///
-    /// The one safe elision is a change that exactly undoes the immediately preceding one: it removes
-    /// that revision again, because nothing observable changed.
+    /// Eliding a change that cancels its predecessor looks safe because nothing observable changed,
+    /// but it is not: a consumer that was one revision behind the cancelled entry replays the next
+    /// entry against a baseline it never reached. Concretely, a cell that goes 0 -> 2 -> 0 -> 7
+    /// leaves a consumer at the 0 -> 2 revision with a log starting at `0 -> 7`, which it then
+    /// applies to a baseline of 2 and reports 7. That is exactly how a storage bus shadowing a drive
+    /// made the mirror report a stale total, so the change is recorded instead.
     fn record_change(&mut self, id: u32, old_total: i64, new_total: i64, cell_id: u32) {
-        if let Some(last) = self.delta_log.back() {
-            let undoes_previous = last.id == id
-                && last.cell_id == cell_id
-                && last.old_total == new_total
-                && last.new_total == old_total;
-            if undoes_previous {
-                self.delta_log.pop_back();
-                self.delta_revision -= 1;
-                return;
-            }
-        }
         self.delta_revision += 1;
         if self.delta_log.len() >= DELTA_LOG_CAPACITY {
             self.delta_log.pop_front();
@@ -896,9 +918,10 @@ impl NetworkIndex {
             .partition_point(|change| change.revision <= since_revision);
         // The range is complete only if it starts at the very next revision.
         match self.delta_log.get(start) {
-            Some(first) if first.revision == since_revision + 1 => {
-                Some((self.delta_revision, self.delta_log.iter().skip(start).copied().collect()))
-            }
+            Some(first) if first.revision == since_revision + 1 => Some((
+                self.delta_revision,
+                self.delta_log.iter().skip(start).copied().collect(),
+            )),
             _ => None,
         }
     }
@@ -1408,7 +1431,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod repro_tests {
     use super::*;
@@ -1444,9 +1466,18 @@ mod repro_tests {
             + entries_b.iter().map(|e| e.1).sum::<i64>()
             + entries_c.iter().map(|e| e.1).sum::<i64>();
         assert_eq!(net.total_amount(), expected_total, "network total mismatch");
-        assert_eq!(net.cell_total(a), entries_a.iter().map(|e| e.1).sum::<i64>());
-        assert_eq!(net.cell_total(b), entries_b.iter().map(|e| e.1).sum::<i64>());
-        assert_eq!(net.cell_total(c), entries_c.iter().map(|e| e.1).sum::<i64>());
+        assert_eq!(
+            net.cell_total(a),
+            entries_a.iter().map(|e| e.1).sum::<i64>()
+        );
+        assert_eq!(
+            net.cell_total(b),
+            entries_b.iter().map(|e| e.1).sum::<i64>()
+        );
+        assert_eq!(
+            net.cell_total(c),
+            entries_c.iter().map(|e| e.1).sum::<i64>()
+        );
 
         // Per-key expectation.
         for i in 0..key_count {
@@ -1674,7 +1705,10 @@ mod posting_tests {
 
         for idx in 0..filtered.ids.len() {
             let id = filtered.ids[idx];
-            let full_idx = full.ids.binary_search(&id).expect("key missing from full query");
+            let full_idx = full
+                .ids
+                .binary_search(&id)
+                .expect("key missing from full query");
             assert_eq!(filtered.amounts[idx], full.amounts[full_idx], "key {id}");
         }
         // Keys outside the filter must not appear.
@@ -1682,10 +1716,52 @@ mod posting_tests {
     }
 }
 
-
 #[cfg(test)]
 mod delta_tests {
     use super::*;
+
+    /// A mutation touches one key, so it must also record one change. Recording the whole cell is
+    /// what made the incremental refresh more expensive than rebuilding the aggregate, and it is the
+    /// reason the delta stream used to be off by default.
+    #[test]
+    fn one_mutation_records_proportionally_few_changes() {
+        const KEY_CAPACITY: usize = 64;
+        let mut net = NetworkIndex::new();
+        let cell = net.add_cell(KEY_CAPACITY, 0);
+
+        // A full cell: 64 keys, which is what AE2's largest cells hold.
+        let full: Vec<(u32, i64)> = (1..=63).map(|id| (id, 10)).collect();
+        net.push_cell(cell, KEY_CAPACITY, &full);
+
+        // One item inserted into the cell.
+        let mut changed = full.clone();
+        changed[7].1 += 1;
+        let revision = net.delta_revision();
+        net.push_cell(cell, KEY_CAPACITY, &changed);
+        let (_, changes) = net
+            .deltas_since(revision)
+            .expect("the range must be replayable");
+        assert_eq!(
+            changes.len(),
+            1,
+            "one item changed, so one change must be recorded: {changes:?}"
+        );
+        assert_eq!(changes[0].id, 8);
+        assert_eq!(changes[0].old_total, 10);
+        assert_eq!(changes[0].new_total, 11);
+
+        // A new key appearing records one change as well, not a removal and an addition per key.
+        let mut grown = changed.clone();
+        grown.push((0, 5));
+        grown.sort_unstable_by_key(|e| e.0);
+        let revision = net.delta_revision();
+        net.push_cell(cell, KEY_CAPACITY, &grown);
+        let (_, changes) = net
+            .deltas_since(revision)
+            .expect("the range must be replayable");
+        assert_eq!(changes.len(), 1, "one added key: {changes:?}");
+        assert_eq!(changes[0].id, 0);
+    }
 
     /// Replaying the change log from a recorded revision must reproduce the aggregate exactly.
     ///
@@ -1706,7 +1782,9 @@ mod delta_tests {
         let cells: Vec<u32> = (0..8).map(|i| net.add_cell(KEY_CAPACITY, i % 3)).collect();
         // A consumer reads the totals and is now up to date at this revision.
         let mut revision = net.delta_revision();
-        let mut baseline: Vec<i64> = (0..KEY_CAPACITY as u32).map(|id| net.total_of(id)).collect();
+        let mut baseline: Vec<i64> = (0..KEY_CAPACITY as u32)
+            .map(|id| net.total_of(id))
+            .collect();
 
         for round in 0..400 {
             match next() % 6 {
@@ -1788,22 +1866,62 @@ mod delta_tests {
         assert_eq!(new_revision, revision);
     }
 
-    /// A change that exactly undoes the previous one leaves no trace.
+    /// A change that exactly undoes the previous one is still recorded. Eliding it would leave a
+    /// consumer that was one revision behind with a log whose entries do not match its baseline.
     #[test]
-    fn a_cancelled_change_leaves_no_trace() {
+    fn a_cancelled_change_is_still_recorded() {
         let mut net = NetworkIndex::new();
         let cell = net.add_cell(8, 0);
         net.push_cell(cell, 8, &[]);
         let revision = net.delta_revision();
 
         net.apply_cell_delta(cell, 1, 5);
-        assert_eq!(net.delta_revision(), revision + 1);
         net.apply_cell_delta(cell, 1, -5);
-        assert_eq!(net.delta_revision(), revision, "a cancelled change undoes its revision");
-
-        let (_, changes) = net.deltas_since(revision).expect("current revision is replayable");
-        assert!(changes.is_empty(), "a net-zero change must not be reported");
         assert_eq!(net.total_of(1), 0);
+
+        let (_, changes) = net
+            .deltas_since(revision)
+            .expect("current revision is replayable");
+        assert_eq!(
+            changes.len(),
+            2,
+            "both changes stay replayable: {changes:?}"
+        );
+        let mut replayed = 0;
+        for change in &changes {
+            assert_eq!(change.old_total, replayed, "revisions must replay densely");
+            replayed = change.new_total;
+        }
+        assert_eq!(replayed, net.total_of(1));
+    }
+
+    /// A consumer that lags one revision behind must still reach the right total, which is what the
+    /// elided cancellation above used to break.
+    #[test]
+    fn a_lagging_consumer_survives_a_cancelled_change() {
+        let mut net = NetworkIndex::new();
+        let cell = net.add_cell(8, 0);
+        net.push_cell(cell, 8, &[]);
+
+        net.apply_cell_delta(cell, 7, 2);
+        // A consumer reads here, i.e. it has seen the total of 2 but not what follows.
+        let consumer = net.delta_revision();
+        net.apply_cell_delta(cell, 7, -2);
+        net.apply_cell_delta(cell, 7, 5);
+
+        let (_, changes) = net
+            .deltas_since(consumer)
+            .expect("the range must be replayable");
+        let mut replayed = 2;
+        for change in &changes {
+            assert_eq!(
+                change.old_total, replayed,
+                "the log must line up with the consumer"
+            );
+            replayed = change.new_total;
+        }
+        assert_eq!(replayed, net.total_of(7));
+        assert_eq!(replayed, 5);
     }
 
     /// Each revision is retained, so a consumer that misses several still replays correctly.
@@ -1840,7 +1958,9 @@ mod delta_tests {
         let mut baseline: Vec<i64> = (0..4u32).map(|id| net.total_of(id)).collect();
 
         net.remove_cell(b);
-        let (next, changes) = net.deltas_since(revision).expect("removal must be replayable");
+        let (next, changes) = net
+            .deltas_since(revision)
+            .expect("removal must be replayable");
         assert_eq!(changes.len(), 2, "both keys of the removed cell changed");
         for change in &changes {
             assert_eq!(baseline[change.id as usize], change.old_total);
@@ -1849,23 +1969,38 @@ mod delta_tests {
         }
         revision = next;
         for id in 0..4u32 {
-            assert_eq!(baseline[id as usize], net.total_of(id), "key {id} after removal");
+            assert_eq!(
+                baseline[id as usize],
+                net.total_of(id),
+                "key {id} after removal"
+            );
         }
 
         // Removing an already removed cell must be a no-op.
         net.remove_cell(b);
-        let (next, changes) = net.deltas_since(revision).expect("empty range is replayable");
-        assert!(changes.is_empty(), "a vacuous removal must not report changes");
+        let (next, changes) = net
+            .deltas_since(revision)
+            .expect("empty range is replayable");
+        assert!(
+            changes.is_empty(),
+            "a vacuous removal must not report changes"
+        );
         assert_eq!(next, revision);
 
         // Removing the last cell brings every key it held to zero.
         net.remove_cell(a);
-        let (_, changes) = net.deltas_since(revision).expect("second removal must be replayable");
+        let (_, changes) = net
+            .deltas_since(revision)
+            .expect("second removal must be replayable");
         for change in &changes {
             baseline[change.id as usize] = change.new_total;
         }
         for id in 0..4u32 {
-            assert_eq!(baseline[id as usize], net.total_of(id), "key {id} after second removal");
+            assert_eq!(
+                baseline[id as usize],
+                net.total_of(id),
+                "key {id} after second removal"
+            );
         }
         assert_eq!(net.total_amount(), 0);
     }
@@ -1889,7 +2024,9 @@ mod delta_tests {
         );
         // The current revision is always replayable and means "nothing to do".
         let now = net.delta_revision();
-        let (_, changes) = net.deltas_since(now).expect("current revision is replayable");
+        let (_, changes) = net
+            .deltas_since(now)
+            .expect("current revision is replayable");
         assert!(changes.is_empty());
     }
 }

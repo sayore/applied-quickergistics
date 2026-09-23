@@ -21,7 +21,6 @@ package appeng.me.storage;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.ArrayList;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -48,11 +47,10 @@ import appeng.util.BootstrapMinecraft;
 /**
  * Exercises the native storage mirror against real AE2 storage cells instead of test doubles.
  * <p>
- * The mirror's own unit test uses hand-written storages, which cannot catch anything that depends on
- * how AE2's real cells behave: {@link BasicCellInventory} keeps its contents in the cell's
- * {@link ItemStack}, {@link DriveWatcher} wraps it, and {@link AEItemKey} instances are canonical. It
- * also cannot catch the case where an {@code MEInventoryHandler} wrapper filters the reported
- * contents and the mirror has to refuse the mount.
+ * The mirror's own unit test uses hand-written storages, which cannot catch anything that depends on how AE2's real
+ * cells behave: {@link BasicCellInventory} keeps its contents in the cell's {@link ItemStack}, {@link DriveWatcher}
+ * wraps it, and {@link AEItemKey} instances are canonical. It also cannot catch the case where an
+ * {@code MEInventoryHandler} wrapper filters the reported contents and the mirror has to refuse the mount.
  */
 @BootstrapMinecraft
 @ExtendWith(EphemeralTestServerProvider.class)
@@ -86,14 +84,15 @@ class RustRealCellTest {
         return new DriveWatcher(inventory, () -> {
         });
     }
+
     /**
      * Aggregates a counter's non-zero contents by key.
      * <p>
-     * {@code KeyCounter} stores amounts in reference-keyed maps, and {@code AEItemKey} instances are
-     * only canonical within one item registry. Comparing two counters by key identity is therefore
-     * unreliable in the test environment, which can end up with more than one {@code Item} instance
-     * for the same item, so the same logical item legitimately lands in two buckets. Aggregating by
-     * key equality compares what the counters actually report: the amounts per item.
+     * {@code KeyCounter} stores amounts in reference-keyed maps, and {@code AEItemKey} instances are only canonical
+     * within one item registry. Comparing two counters by key identity is therefore unreliable in the test environment,
+     * which can end up with more than one {@code Item} instance for the same item, so the same logical item
+     * legitimately lands in two buckets. Aggregating by key equality compares what the counters actually report: the
+     * amounts per item.
      */
     private static Map<AEKey, Long> snapshot(KeyCounter counter) {
         var map = new java.util.LinkedHashMap<AEKey, Long>();
@@ -109,8 +108,8 @@ class RustRealCellTest {
     /**
      * Compares two aggregates by key equality and primitive amount.
      * <p>
-     * Neither {@code Map.equals} nor AssertJ's containment check works here: the keys are identity
-     * compared, and the amounts are boxed longs.
+     * Neither {@code Map.equals} nor AssertJ's containment check works here: the keys are identity compared, and the
+     * amounts are boxed longs.
      */
     private static void assertSameContents(Map<AEKey, Long> actual, Map<AEKey, Long> expected) {
         assertThat(actual.size()).as("distinct items").isEqualTo(expected.size());
@@ -124,7 +123,6 @@ class RustRealCellTest {
                     .isEqualTo(entry.getValue().longValue());
         }
     }
-
 
     /** The aggregate the Java path produces for the given mounts. */
     private static Map<AEKey, Long> javaAggregate(List<MEStorage> mounts) {
@@ -195,8 +193,8 @@ class RustRealCellTest {
     /**
      * The counter the mirror hands out must describe the same network contents as the Java path.
      * <p>
-     * {@code StorageService} adopts this counter instead of copying it, so an error here would show
-     * up as a wrong terminal or a wrong autocrafting decision, not as a crash.
+     * {@code StorageService} adopts this counter instead of copying it, so an error here would show up as a wrong
+     * terminal or a wrong autocrafting decision, not as a crash.
      */
     @Test
     void sharedCounterMatchesJavaAggregate() {
@@ -230,9 +228,8 @@ class RustRealCellTest {
     }
 
     /**
-     * A single mount the mirror cannot reproduce must be visible, because it currently disables the
-     * mirror for the whole network - and without a report that degradation looks like a healthy
-     * network that simply runs slower.
+     * A single mount the mirror cannot reproduce must be visible, because it currently disables the mirror for the
+     * whole network - and without a report that degradation looks like a healthy network that simply runs slower.
      */
     @Test
     void coverageReportsExcludedMounts() {
@@ -266,9 +263,9 @@ class RustRealCellTest {
     /**
      * The point of partial coverage: a mount the mirror cannot reproduce must cost only itself.
      * <p>
-     * Before this, one such mount disabled the mirror for the whole network. The result has to stay
-     * exact either way, which is what this checks - a mixed network must read the same as if the
-     * mirror were not there at all, both before and after the covered cells change.
+     * Before this, one such mount disabled the mirror for the whole network. The result has to stay exact either way,
+     * which is what this checks - a mixed network must read the same as if the mirror were not there at all, both
+     * before and after the covered cells change.
      */
     @Test
     void mixedNetworkMatchesJavaAggregate() {

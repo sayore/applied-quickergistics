@@ -20,6 +20,7 @@ package appeng.me.service;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -80,8 +81,8 @@ public class StorageService implements IStorageService, IGridServiceProvider {
      * Publicly exposed cached available stacks.
      */
     /**
-     * The network's available stacks, replaced wholesale when the native mirror can hand out its
-     * maintained counter (see the fast path in {@link #updateCachedStacks()}).
+     * The network's available stacks, replaced wholesale when the native mirror can hand out its maintained counter
+     * (see the fast path in {@link #updateCachedStacks()}).
      */
     private KeyCounter cachedAvailableStacks = new KeyCounter();
     /**
@@ -91,10 +92,19 @@ public class StorageService implements IStorageService, IGridServiceProvider {
     private final Object2LongMap<AEKey> cachedAvailableAmounts = new Object2LongOpenHashMap<>();
     private boolean cachedStacksNeedUpdate = true;
     /**
-     * Native revision the cached inventory corresponds to, or {@code -1} when the incremental path
-     * cannot be used (no native mirror, or the cache has never been built).
+     * Native revision the cached inventory corresponds to, or {@code -1} when the incremental path cannot be used (no
+     * native mirror, or the cache has never been built).
      */
     private long cachedRevision = -1;
+    /**
+     * The mounts the mirror could not reproduce, read into a counter owned by this service.
+     * <p>
+     * {@code null} means the cache is purely the mirror's counter and may be handed out directly. Non-null marks that
+     * the exposed cache is a merge, which also disables the incremental path, because that path only knows about the
+     * mirrored mounts.
+     */
+    @Nullable
+    private KeyCounter uncoveredStacks;
     /**
      * Tracks the stack watcher associated with a given grid node. Needed to clean up watchers when the node leaves the
      * grid.
@@ -128,7 +138,7 @@ public class StorageService implements IStorageService, IGridServiceProvider {
             // refresh, only the changed keys have to be touched instead of every key in the network.
             // That is the difference between work proportional to the size of the network and work
             // proportional to what actually happened during this tick.
-            if (cachedRevision >= 0 && RustStorageIndex.isIncrementalRefreshEnabled()) {
+            if (cachedRevision >= 0 && uncoveredStacks == null && RustStorageIndex.isIncrementalRefreshEnabled()) {
                 var deltas = storage.deltasSince(cachedRevision);
                 if (deltas != null) {
                     applyDeltas(deltas);
@@ -141,14 +151,43 @@ public class StorageService implements IStorageService, IGridServiceProvider {
             // Java (measured at ~187 us for 1827 stored types), while handing the counter over costs
             // under a microsecond.
             var shared = storage.getSharedAvailableStacks();
-            if (shared != null) {
+            var uncovered = shared != null ? storage.getUncoveredMounts() : Collections.<MEStorage>emptySet();
+            if (shared != null && uncovered.isEmpty()) {
                 cachedAvailableStacks = shared;
+                uncoveredStacks = null;
             } else {
-                // Fall back to this service's own counter. `clear` only clears the inner maps, so the
-                // outer map has to be cleaned up explicitly.
-                cachedAvailableStacks.clear();
-                storage.getAvailableStacks(cachedAvailableStacks);
-                cachedAvailableStacks.removeEmptySubmaps();
+                // The result this service exposes has to include the mounts the mirror cannot
+                // reproduce (a storage bus, a filtered handler). They are read into a counter of
+                // their own and merged into one this service owns: the mirror's counter is shared with
+                // the mirror and must not be written to, and accumulating into it would add the
+                // uncovered mounts again on every query.
+                if (uncoveredStacks == null) {
+                    uncoveredStacks = new KeyCounter();
+                } else {
+                    uncoveredStacks.clear();
+                }
+                if (shared == null) {
+                    // No mirror at all. `clear` only empties the inner maps, so the outer map has to
+                    // be cleaned up explicitly.
+                    cachedAvailableStacks.clear();
+                    storage.getAvailableStacks(cachedAvailableStacks);
+                    cachedAvailableStacks.removeEmptySubmaps();
+                } else {
+                    storage.gatherUncovered(uncoveredStacks, uncovered);
+                    // The cache is rebuilt from scratch: the mirrored amounts are written absolutely
+                    // and the uncovered amounts are accumulated on top, so a key that is in neither
+                    // anymore has to go rather than linger at its previous amount.
+                    cachedAvailableStacks.clear();
+                    // `clear` only empties the inner maps, so the outer map has to be cleaned up too.
+                    for (var entry : shared) {
+                        cachedAvailableStacks.set(entry.getKey(), entry.getLongValue());
+                    }
+                    for (var entry : uncoveredStacks) {
+                        // Keys that are only in an uncovered mount have nothing to add to.
+                        cachedAvailableStacks.add(entry.getKey(), entry.getLongValue());
+                    }
+                    cachedAvailableStacks.removeEmptySubmaps();
+                }
             }
 
             // Post watcher update for currently available stacks
@@ -173,20 +212,22 @@ public class StorageService implements IStorageService, IGridServiceProvider {
                 cachedAvailableAmounts.put(entry.getKey(), entry.getLongValue());
             }
 
-            // Remember which revision this cache reflects, so the next tick can go incremental.
-            cachedRevision = storage.revision();
+            // Remember which revision this cache reflects, so the next tick can go incremental. A
+            // cache that also contains uncovered mounts is not purely mirrored, so it is rebuilt on
+            // every tick instead.
+            cachedRevision = uncoveredStacks == null ? storage.revision() : -1;
         } finally {
             inventoryRefreshStats.add(System.nanoTime() - time);
         }
     }
 
     /**
-     * Applies a replayable run of network-total changes to the cached inventory and notifies the
-     * watchers whose value changed.
+     * Applies a replayable run of network-total changes to the cached inventory and notifies the watchers whose value
+     * changed.
      * <p>
-     * The observable result is identical to a full rebuild: a watcher is notified when its key's
-     * total changes, and a key that drops to zero is removed from the cache rather than left behind
-     * as a zero entry, which would leak when keys churn.
+     * The observable result is identical to a full rebuild: a watcher is notified when its key's total changes, and a
+     * key that drops to zero is removed from the cache rather than left behind as a zero entry, which would leak when
+     * keys churn.
      */
     private void applyDeltas(RustStorageIndex.ChangeSet deltas) {
         for (var change : deltas.changes()) {
