@@ -146,6 +146,16 @@ public class StorageService implements IStorageService, IGridServiceProvider {
                 }
             }
 
+            // Nothing can have changed while the mirror's revision is unchanged, and the mirror
+            // reports out-of-band mutations through that revision (an IO port filling a cell bumps
+            // the cell's version). Without this, an idle network still walked every stored type here
+            // to compare it against the previous amounts - 1827 map lookups per tick in the benchmark,
+            // and it grows with the network, which is exactly when an idle tick should cost nothing.
+            var revisionNow = storage.revision();
+            if (revisionNow >= 0 && revisionNow == cachedRevision && uncoveredStacks == null) {
+                return;
+            }
+
             // Fast path: the mirror maintains the aggregate itself, so take its counter instead of
             // copying every entry into this one. The copy is what made the mirror slower than plain
             // Java (measured at ~187 us for 1827 stored types), while handing the counter over costs

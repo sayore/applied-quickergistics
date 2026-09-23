@@ -348,6 +348,10 @@ report a version that moves when that cache reports a change. Two caveats before
   handed, at a cost proportional to the stored types, that measured the consumer's growing copy and
   reported the mirror as *slower* than plain Java (0.4x). The phase now swaps one item in and one out,
   so the network is stable and the number describes the refresh itself.
+* `StorageService.updateCachedStacks` used to walk every stored type on every tick even when nothing
+  had changed, to compare each amount against the previous one and notify watchers. Nothing can have
+  changed while the mirror's revision is unchanged, so an idle tick now returns before that walk. The
+  per-key watcher bookkeeping itself is unchanged for ticks that do change something.
 * `RustStorageIndex#resetProfiling`/`profilingSummary` attribute a phase to `sync`, the cell re-read
   and the delta application. They exist because the first honest-looking number here (0.4x) was an
   artifact twice over, and guessing at the cause wasted more time than measuring it.
