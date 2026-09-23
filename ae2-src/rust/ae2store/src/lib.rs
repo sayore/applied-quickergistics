@@ -464,8 +464,18 @@ pub struct NetworkIndex {
     order_dirty: bool,
     /// Ring buffer of changes to network totals that a consumer has not acknowledged yet.
     delta_log: VecDeque<TotalChange>,
-    /// Revision the network totals are at. Every retained change occupies exactly one revision.
+    /// Revision the network totals are at. Every change occupies exactly one revision, whether or not
+    /// it is retained in the log.
     delta_revision: u64,
+    /// Whether changes are being retained for a consumer.
+    ///
+    /// Recording costs a log entry per mutated key, and nothing needs them until something asks for
+    /// them. Retention starts on, so a consumer that connects does not have to catch a particular
+    /// instant to be served, and switches off as soon as a consumer asks for a range the log cannot
+    /// provide. That bounds the log for a consumer that can never be served - one behind an
+    /// unmirrored mount is told to recompute every time - instead of letting it fill to capacity with
+    /// entries nothing will read.
+    retain_changes: bool,
     /// Diagnostic: `push_cell` calls that actually changed something, and total calls.
     push_real: u64,
     push_total: u64,
@@ -492,6 +502,7 @@ impl NetworkIndex {
     pub fn new() -> Self {
         Self {
             order_dirty: true,
+            retain_changes: true,
             ..Default::default()
         }
     }
@@ -499,6 +510,22 @@ impl NetworkIndex {
     #[inline]
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Turns change recording on or off.
+    ///
+    /// A caller that knows it cannot use the change log - because a mounted storage cannot be mirrored,
+    /// so its changes would be missing from the log - switches it off rather than letting the log fill
+    /// to capacity with entries nothing will read.
+    pub fn set_retain_changes(&mut self, retain: bool) {
+        if self.retain_changes == retain {
+            return;
+        }
+        self.retain_changes = retain;
+        if !retain {
+            self.delta_log.clear();
+            self.delta_log.shrink_to_fit();
+        }
     }
 
     #[inline]
@@ -908,6 +935,9 @@ impl NetworkIndex {
     /// made the mirror report a stale total, so the change is recorded instead.
     fn record_change(&mut self, id: u32, old_total: i64, new_total: i64, cell_id: u32) {
         self.delta_revision += 1;
+        if !self.retain_changes {
+            return;
+        }
         if self.delta_log.len() >= DELTA_LOG_CAPACITY {
             self.delta_log.pop_front();
         }
@@ -926,13 +956,20 @@ impl NetworkIndex {
     /// current state. Returns `None` when that range is no longer retained, in which case the caller
     /// recomputes the aggregate instead of applying changes. Calling this never discards anything a
     /// slower consumer might still need.
-    pub fn deltas_since(&self, since_revision: u64) -> Option<(u64, Vec<TotalChange>)> {
+    pub fn deltas_since(&mut self, since_revision: u64) -> Option<(u64, Vec<TotalChange>)> {
         if since_revision > self.delta_revision {
             // A consumer cannot have seen a future revision.
             return None;
         }
         if since_revision == self.delta_revision {
+            // The consumer is already up to date, so it is a consumer: keep recording for it.
+            self.retain_changes = true;
             return Some((self.delta_revision, Vec::new()));
+        }
+        // There is a real gap. If it was not retained, this consumer cannot be served and recording for
+        // it would only accumulate entries nothing will read. Returning None tells it to recompute.
+        if !self.retain_changes {
+            return None;
         }
         // Entries are appended in revision order, so the first one a consumer still needs can be
         // found by binary search instead of scanning the whole retained log. Without this, every
@@ -941,13 +978,17 @@ impl NetworkIndex {
         let start = self
             .delta_log
             .partition_point(|change| change.revision <= since_revision);
-        // The range is complete only if it starts at the very next revision.
+        // The range is complete only if it starts at the very next revision. When it is not, the
+        // consumer cannot be served, so stop accumulating entries for it.
         match self.delta_log.get(start) {
             Some(first) if first.revision == since_revision + 1 => Some((
                 self.delta_revision,
                 self.delta_log.iter().skip(start).copied().collect(),
             )),
-            _ => None,
+            _ => {
+                self.retain_changes = false;
+                None
+            }
         }
     }
 
@@ -2020,7 +2061,48 @@ mod posting_tests {
 mod delta_tests {
     use super::*;
 
-    /// A mutation touches one key, so it must also record one change. Recording the whole cell is
+    /// A caller that cannot use the change log must be able to stop it growing.
+    ///
+    /// A mounted storage the mirror cannot see makes the log incomplete, and the Java side tells such a
+    /// consumer to recompute rather than serve it a range with holes. Without switching retention off,
+    /// the log would fill to its capacity with entries nothing will ever read.
+    #[test]
+    fn retention_can_be_switched_off_and_back_on() {
+        let mut net = NetworkIndex::new();
+        let cell = net.add_cell(8, 0);
+        net.push_cell(cell, 8, &[]);
+
+        // On by default, so a consumer that connects immediately is served.
+        net.apply_cell_delta(cell, 1, 1);
+        assert_eq!(net.pending_delta_count(), 1);
+
+        // A caller that cannot use the log switches it off; what was retained is dropped.
+        net.set_retain_changes(false);
+        assert_eq!(net.pending_delta_count(), 0);
+        let revision = net.delta_revision();
+        for _ in 0..1000 {
+            net.apply_cell_delta(cell, 1, 1);
+        }
+        assert_eq!(
+            net.pending_delta_count(),
+            0,
+            "nothing must accumulate while it is off"
+        );
+        assert_eq!(net.total_of(1), 1001);
+
+        // Turning it back on resumes from the current revision, so a consumer that asks from there is
+        // served correctly.
+        net.set_retain_changes(true);
+        let revision = net.delta_revision().max(revision);
+        net.apply_cell_delta(cell, 1, 5);
+        let (_, changes) = net
+            .deltas_since(revision)
+            .expect("a current consumer must be served");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].new_total, net.total_of(1));
+    }
+
+    /// A mutation touches one key, so it must also record one change.    /// A mutation touches one key, so it must also record one change. Recording the whole cell is
     /// what made the incremental refresh more expensive than rebuilding the aggregate, and it is the
     /// reason the delta stream used to be off by default.
     #[test]

@@ -229,9 +229,11 @@ public final class RustStorageIndex {
      */
     public final long[] diag = new long[4];
     /** Mounts the mirror cannot reproduce, so the caller has to read them in Java. */
-    private final Set<MEStorage> uncovered = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private Set<MEStorage> uncovered = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     /** Set by the last {@link #sync()} when {@link #uncovered} is not empty. */
     private boolean uncoveredVisible;
+    /** Whether the native index is currently retaining changes. Kept in step with coverage. */
+    private boolean retainedChanges = true;
 
     /**
      * Why a mount could not be mirrored.
@@ -425,12 +427,15 @@ public final class RustStorageIndex {
 
     private boolean syncInner() {
         var revisionBefore = index.deltaRevision();
-        uncovered.clear();
-        uncoveredVisible = false;
+        // Rebuilt from scratch every sync. It used to be cleared and then only added to, so a mount that
+        // could not be mirrored once stayed "uncovered" for the rest of the session - which kept the
+        // network on the merged path and refused the delta stream forever.
+        var uncoveredNow = java.util.Collections.<MEStorage>newSetFromMap(new java.util.IdentityHashMap<>());
+        var coveragePartial = false;
         for (var i = 0; i < pending.size(); i++) {
             var m = pending.get(i);
             if (!push(m)) {
-                uncovered.add(m.storage);
+                uncoveredNow.add(m.storage);
             }
         }
         if (!pending.isEmpty()) {
@@ -445,20 +450,36 @@ public final class RustStorageIndex {
         // cell; everything expensive happens behind it: a cell whose version did not move returns
         // early in `push`, and when no cell moved the aggregate counter is not touched at all.
         diag[2]++;
-        var covered = true;
         for (var mounted : cells.values()) {
             if (!push(mounted)) {
-                covered = false;
-                uncovered.add(mounted.storage);
+                uncoveredNow.add(mounted.storage);
             }
         }
-        if (!covered) {
+        uncovered = uncoveredNow;
+        uncoveredVisible = !uncoveredNow.isEmpty();
+        if (uncoveredVisible) {
             // A mount that cannot be mirrored does not invalidate the mirror: the counter keeps the
             // sum of the mounts that *can* be reproduced, and the caller adds the excluded mounts on
             // top. Before this was per-mount, a single unmirrorable storage (a storage bus, a filtered
             // handler) forced the entire network back onto the Java path, which threw away the
             // acceleration for every mirrored cell as well.
-            uncoveredVisible = true;
+            coveragePartial = true;
+        }
+        // The log is only usable while every mount is mirrored: with a mount missing from it, a consumer
+        // would silently lose that mount's changes. Stop recording in that state and resume when coverage
+        // is complete. Each switch is a transition, never a per-sync action - toggling unconditionally
+        // would clear the log on every sync and leave a consumer with nothing to replay.
+        if (coveragePartial && retainedChanges) {
+            retainedChanges = false;
+            index.setRetainChanges(false);
+        } else if (!coveragePartial && !retainedChanges) {
+            retainedChanges = true;
+            index.setRetainChanges(true);
+        }
+        if (coveragePartial) {
+            // The maintained counter is the only source a caller can use, and the log cannot describe
+            // the change, so refresh it from the native totals.
+            maintainedCounter = null;
         }
         return updateMaintainedCounter(revisionBefore);
     }
@@ -716,6 +737,11 @@ public final class RustStorageIndex {
     /** Diagnostic: the sum of the native network totals. */
     public long nativeTotalAmount() {
         return index.totalAmount();
+    }
+
+    /** Diagnostic: whether the native index is currently retaining changes. */
+    public boolean isRetainingChanges() {
+        return retainedChanges;
     }
 
     /** Diagnostic: how many retained changes the native log currently holds. */

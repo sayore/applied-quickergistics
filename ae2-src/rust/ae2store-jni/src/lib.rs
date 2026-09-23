@@ -373,6 +373,18 @@ pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_pendingDe
 }
 
 #[no_mangle]
+pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_setRetainChanges(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    retain: jboolean,
+) {
+    if let Some(h) = unsafe { handle_ref(handle) } {
+        h.index.set_retain_changes(retain != 0);
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_appeng_storage_nativebridge_NativeBindings_deltaRevision(
     _env: JNIEnv,
     _class: JClass,

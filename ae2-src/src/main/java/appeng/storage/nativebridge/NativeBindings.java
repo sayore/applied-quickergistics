@@ -70,6 +70,8 @@ final class NativeBindings {
 
     static native long deltaRevision(long handle);
 
+    static native void setRetainChanges(long handle, boolean retain);
+
     static native long pendingDeltaCount(long handle);
 
     static native long[] pushStats(long handle);

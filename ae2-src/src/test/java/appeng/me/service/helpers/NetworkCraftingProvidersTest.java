@@ -8,8 +8,11 @@ import java.util.List;
 import java.util.Set;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.item.Items;
+import net.neoforged.testframework.junit.EphemeralTestServerProvider;
 
 import appeng.api.crafting.IPatternDetails;
 import appeng.api.networking.IGridNode;
@@ -22,7 +25,15 @@ import appeng.crafting.simulation.helpers.ProcessingPatternBuilder;
 import appeng.util.BootstrapMinecraft;
 
 @BootstrapMinecraft
+@ExtendWith(EphemeralTestServerProvider.class)
 class NetworkCraftingProvidersTest {
+    /**
+     * Injecting the server is what binds the item components; without it {@code ItemStack} construction fails with
+     * "Components not bound yet" whenever this class runs in a JVM that no other test has bootstrapped.
+     */
+    NetworkCraftingProvidersTest(MinecraftServer server) {
+    }
+
     @Test
     void basicTest() {
         var craftingProviders = new NetworkCraftingProviders();

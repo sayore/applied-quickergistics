@@ -218,6 +218,18 @@ public final class NativeNetworkIndex implements AutoCloseable {
         return NativeBindings.pushStats(handle);
     }
 
+    /**
+     * Whether the native index should retain changes for a consumer.
+     * <p>
+     * Switched off when a mounted storage cannot be mirrored, because the log would then be missing that storage's
+     * changes and no consumer can use it. The index drops what it retained and stops accumulating, instead of holding
+     * megabytes nothing will read.
+     */
+    public void setRetainChanges(boolean retain) {
+        requireOpen();
+        NativeBindings.setRetainChanges(handle, retain);
+    }
+
     /** Diagnostic: the number of changes the native log currently retains. */
     public int pendingDeltaCount() {
         requireOpen();

@@ -451,6 +451,75 @@ class RustStorageIndexTest {
     }
 
     /**
+     * Coverage has to be recomputed from the current mounts, not accumulated.
+     * <p>
+     * A mount that cannot be mirrored once used to stay "uncovered" for the rest of the session, because the uncovered
+     * set was cleared and then only added to. The mirror then kept the network on the merged path and refused the delta
+     * stream forever, for a mount that was not even there any more.
+     */
+    @Test
+    void coverageRecoversWhenAnUnmirrorableMountGoesAway() {
+        var versioned = new FakeStorage();
+        versioned.set(key(0), 10);
+        var unversioned = new UnversionedStorage();
+        unversioned.contents.put(key(1), 5);
+
+        var network = new NetworkStorage();
+        network.mount(0, versioned);
+        var out = new KeyCounter();
+        network.getAvailableStacks(out);
+        assertThat(network.getUncoveredMounts()).as("a versioned mount is covered").isEmpty();
+        assertThat(network.getSharedAvailableStacks())
+                .as("a fully covered network must serve the shared counter")
+                .isNotNull();
+
+        // Mounting something the mirror cannot see makes it partial.
+        network.mount(1, unversioned);
+        network.getAvailableStacks(out);
+        assertThat(network.getUncoveredMounts()).containsExactly(unversioned);
+        assertMatchesReference(network, List.of(versioned, unversioned));
+
+        // Removing it must restore full coverage rather than leaving the network degraded.
+        network.unmount(unversioned);
+        network.getAvailableStacks(out);
+        assertThat(network.getUncoveredMounts())
+                .as("coverage must be recomputed, not accumulated")
+                .isEmpty();
+        assertThat(network.getSharedAvailableStacks())
+                .as("the mirror must be usable again")
+                .isNotNull();
+        assertMatchesReference(network, List.of(versioned));
+
+        // The mount change itself is reported as "recompute instead", exactly as for any other mount
+        // change: the consumer cannot replay across a change to the mount set.
+        assertThat(network.deltasSince(network.revision()))
+                .as("a mount change must send the consumer to a full refresh")
+                .isNull();
+
+        // From there on the delta stream has to work again, which a stale uncovered flag would have kept
+        // blocked for the rest of the session.
+        versioned.set(key(0), 25);
+        network.getAvailableStacks(out);
+        var beforeChange = network.revision();
+        versioned.set(key(0), 26);
+        network.getAvailableStacks(out);
+        assertThat(beforeChange).isLessThan(network.revision());
+        assertThat(network.deltasSince(beforeChange))
+                .as("a recovered network must describe its changes again")
+                .isNotNull();
+    }
+
+    private static RustStorageIndex mirrorOf(NetworkStorage network) {
+        try {
+            var field = NetworkStorage.class.getDeclaredField("nativeIndex");
+            field.setAccessible(true);
+            return (RustStorageIndex) field.get(network);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
      * Fuzzes the partial-coverage merge: a changing mix of mirrored and unmirrored mounts, mutated behind the network's
      * back, mounted and unmounted while the network is queried.
      * <p>
