@@ -93,7 +93,14 @@ public final class DenseKeyInterner<T> {
      * @return the id for {@code key} without assigning one, or {@code -1}.
      */
     public int idOf(T key) {
-        return ids.getInt(key);
+        var id = ids.getInt(key);
+        if (id >= 0) {
+            return id;
+        }
+        // Fall back to the primary key: callers look up by whatever instance they happen to hold, and
+        // AE2 hands out a fresh one per call. Returning -1 for a resource this interner knows would make
+        // every by-key query report zero.
+        return idsByPrimaryKey.getInt(primaryKey.apply(key));
     }
 
     /**

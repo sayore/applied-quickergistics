@@ -73,6 +73,21 @@ public final class RustStorageIndex {
     private static final boolean ENABLED = resolveEnabled();
 
     private final NativeNetworkIndex index;
+    /**
+     * Releases the native index when this mirror becomes unreachable.
+     * <p>
+     * The handle owns native memory - a change log alone can grow to a few megabytes - and nothing in the grid
+     * lifecycle calls {@link #close()}. A network is discarded whenever its grid empties, which happens constantly in
+     * play, so without this every grid that ever existed leaked its index until the JVM exited. The action is
+     * registered on a separate state object so that holding it does not keep the mirror itself alive.
+     */
+    private static final java.lang.ref.Cleaner CLEANER = java.lang.ref.Cleaner.create(
+            runnable -> {
+                var thread = new Thread(runnable, "ae2store-index-cleaner");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private final java.lang.ref.Cleaner.Cleanable cleanable;
     private final DenseKeyInterner<AEKey> interner = new DenseKeyInterner<>(AEKey::getPrimaryKey);
 
     /** Mirrored mounts, keyed by the storage instance that was mounted. */
@@ -91,6 +106,15 @@ public final class RustStorageIndex {
 
     private RustStorageIndex() {
         this.index = NativeNetworkIndex.create();
+        this.cleanable = CLEANER.register(this, new NativeHandleRelease(this.index));
+    }
+
+    /** Releases a mirror's native handle exactly once, from {@link #close()} or from the cleaner. */
+    private record NativeHandleRelease(NativeNetworkIndex index) implements Runnable {
+        @Override
+        public void run() {
+            index.close();
+        }
     }
 
     /**
@@ -120,8 +144,17 @@ public final class RustStorageIndex {
         return appeng.storage.nativebridge.NativeLibrary.isAvailable();
     }
 
+    /**
+     * Releases the native index. Idempotent, and also performed by the cleaner when this mirror is collected, so a
+     * caller that cannot know when a network is done does not have to call it.
+     */
     public void close() {
-        index.close();
+        cleanable.clean();
+    }
+
+    /** @return whether the native index is still open. For tests and diagnostics. */
+    public boolean isOpen() {
+        return index.isOpen();
     }
 
     /**

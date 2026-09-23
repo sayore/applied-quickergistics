@@ -301,6 +301,70 @@ class RustRealCellTest {
         }
     }
 
+    /**
+     * The single-key and multi-key amount lookups must agree with the full aggregate, including after a mutation that
+     * happened behind the network's back. They are the shape a terminal search or a "can I craft this?" check uses.
+     */
+    @Test
+    void perKeyAmountLookupsMatchTheAggregate() {
+        var cell = driveCell(List.of(new ItemStack(Items.STONE, 100), new ItemStack(Items.DIRT, 50)));
+        var second = driveCell(List.of(new ItemStack(Items.STONE, 7)));
+        var network = new NetworkStorage();
+        network.mount(0, cell);
+        network.mount(3, second);
+
+        var mirror = mirrorOf(network);
+        assertThat(mirror).as("the mirror must be enabled for this test").isNotNull();
+
+        var stone = AEItemKey.of(new ItemStack(Items.STONE));
+        var dirt = AEItemKey.of(new ItemStack(Items.DIRT));
+        var emerald = AEItemKey.of(new ItemStack(Items.EMERALD));
+
+        assertThat(mirror.amountOf(stone)).isEqualTo(107);
+        assertThat(mirror.amountOf(dirt)).isEqualTo(50);
+        assertThat(mirror.amountOf(emerald)).as("a key the network never held").isZero();
+        assertThat(mirror.amountsOf(new AEKey[] { stone, emerald, dirt }))
+                .containsExactly(107, 0, 50);
+
+        // The lookup has to see a mutation that happened behind the network's back, not a cached total.
+        var inventory = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) cell.getDelegate());
+        inventory.insert(stone, 900, Actionable.MODULATE, src);
+        inventory.extract(dirt, 20, Actionable.MODULATE, src);
+
+        assertThat(mirror.amountOf(stone)).as("mirror must mirror the mount before answering").isEqualTo(1007);
+        assertThat(mirror.amountOf(dirt)).isEqualTo(30);
+        assertThat(mirror.amountsOf(new AEKey[] { stone, dirt })).containsExactly(1007, 30);
+        assertThat(mirror.amountsOf(new AEKey[0])).isEmpty();
+    }
+
+    /**
+     * The filtered query takes native key ids, so its contract is that ids come from
+     * {@link RustStorageIndex#interner()}. It must agree with the full aggregate for the keys it is asked about.
+     */
+    @Test
+    void filteredQueryMatchesTheAggregate() {
+        var cell = driveCell(List.of(new ItemStack(Items.STONE, 100), new ItemStack(Items.DIRT, 50)));
+        var network = new NetworkStorage();
+        network.mount(0, cell);
+        var mirror = mirrorOf(network);
+        assertThat(mirror).isNotNull();
+
+        var stone = AEItemKey.of(new ItemStack(Items.STONE));
+        var dirt = AEItemKey.of(new ItemStack(Items.DIRT));
+        // Intern both keys first, as a caller would have to.
+        assertThat(mirror.amountsOf(new AEKey[] { stone, dirt })).containsExactly(100, 50);
+
+        var stoneId = mirror.interner().idOf(stone);
+        var dirtId = mirror.interner().idOf(dirt);
+        assertThat(stoneId).isNotNegative();
+        assertThat(dirtId).isNotNegative();
+
+        var filtered = mirror.getAvailableStacks(new int[] { stoneId });
+        assertThat(filtered).isNotNull();
+        assertThat(filtered.get(stone)).isEqualTo(100);
+        assertThat(filtered.get(dirt)).as("a key outside the filter").isZero();
+    }
+
     private static RustStorageIndex mirrorOf(NetworkStorage network) {
         try {
             var field = NetworkStorage.class.getDeclaredField("nativeIndex");

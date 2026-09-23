@@ -77,7 +77,7 @@ class DenseKeyInternerTest {
     }
 
     @Test
-    void lookupByTheOriginalInstanceStaysStable() {
+    void lookupResolvesAnyInstanceOfAKnownResource() {
         var interner = interner();
         var item = new Object();
         var first = new Key(item, 1);
@@ -87,8 +87,17 @@ class DenseKeyInternerTest {
         interner.intern(second);
         assertThat(interner.idOf(first)).isEqualTo(id);
         assertThat(interner.idOf(second)).isEqualTo(id);
-        assertThat(interner.idOf(new Key(item, 3))).as("an unseen instance has no id yet").isEqualTo(-1);
-        assertThat(interner.intern(new Key(item, 3))).isEqualTo(id);
-        assertThat(interner.size()).isEqualTo(1);
+        // Callers look up with the instance they hold, and AE2 hands out a fresh one per call. Reporting
+        // "unknown" here would make every by-key query against the mirror answer zero.
+        assertThat(interner.idOf(new Key(item, 3))).isEqualTo(id);
+        assertThat(interner.size()).as("looking up must not assign an id").isEqualTo(1);
+    }
+
+    @Test
+    void lookupOfAnUnknownResourceIsStillUnknown() {
+        var interner = interner();
+        interner.intern(new Key(new Object(), 1));
+
+        assertThat(interner.idOf(new Key(new Object(), 1))).isEqualTo(-1);
     }
 }
