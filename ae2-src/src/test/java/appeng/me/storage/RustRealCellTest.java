@@ -365,6 +365,54 @@ class RustRealCellTest {
         assertThat(filtered.get(dirt)).as("a key outside the filter").isZero();
     }
 
+    /**
+     * The write path is pure Java - the mirror serves only the aggregate - but it is what players hit when they pull
+     * items out, and its priority order is load-bearing: a lower-priority cell drains first, and extraction must stop
+     * as soon as the request is satisfied.
+     */
+    @Test
+    void extractionDrainsCellsInAscendingPriorityOrder() {
+        var low = driveCell(List.of(new ItemStack(Items.STONE, 3)));
+        var middle = driveCell(List.of(new ItemStack(Items.STONE, 4)));
+        var high = driveCell(List.of(new ItemStack(Items.STONE, 5)));
+        var network = new NetworkStorage();
+        // Mounted out of order on purpose, so the priority map has to sort rather than preserve it.
+        network.mount(5, high);
+        network.mount(-1, low);
+        network.mount(2, middle);
+
+        var stone = AEItemKey.of(new ItemStack(Items.STONE));
+        var lowInv = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) low.getDelegate());
+        var middleInv = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) middle.getDelegate());
+        var highInv = (BasicCellInventory) ((appeng.api.storage.cells.StorageCell) high.getDelegate());
+
+        // A simulate must report what is available without touching anything.
+        assertThat(network.extract(stone, 100, Actionable.SIMULATE, src)).isEqualTo(12);
+        assertThat(lowInv.getAvailableStacks().get(stone)).isEqualTo(3);
+        assertThat(highInv.getAvailableStacks().get(stone)).isEqualTo(5);
+
+        // Draining one item takes it from the lowest priority cell.
+        assertThat(network.extract(stone, 1, Actionable.MODULATE, src)).isEqualTo(1);
+        assertThat(lowInv.getAvailableStacks().get(stone)).isEqualTo(2);
+        assertThat(middleInv.getAvailableStacks().get(stone)).isEqualTo(4);
+
+        // Draining past the first cell continues into the next one, and stops at the request. The low
+        // cell has 2 left, so 2 come from it and 2 from the next cell in priority order.
+        assertThat(network.extract(stone, 4, Actionable.MODULATE, src)).isEqualTo(4);
+        assertThat(lowInv.getAvailableStacks().get(stone)).as("the low cell drains first").isZero();
+        assertThat(middleInv.getAvailableStacks().get(stone)).isEqualTo(2);
+        assertThat(highInv.getAvailableStacks().get(stone)).as("the highest priority is untouched").isEqualTo(5);
+
+        // Asking for more than exists takes everything and reports what it took.
+        assertThat(network.extract(stone, 1_000, Actionable.MODULATE, src)).isEqualTo(7);
+        assertThat(lowInv.getAvailableStacks().get(stone)).isZero();
+        assertThat(middleInv.getAvailableStacks().get(stone)).isZero();
+        assertThat(highInv.getAvailableStacks().get(stone)).isZero();
+
+        // Nothing left to take.
+        assertThat(network.extract(stone, 1, Actionable.MODULATE, src)).isZero();
+    }
+
     private static RustStorageIndex mirrorOf(NetworkStorage network) {
         try {
             var field = NetworkStorage.class.getDeclaredField("nativeIndex");
