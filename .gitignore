@@ -13,3 +13,7 @@ ae2-src/rust/target/
 # Editor/OS noise
 *.swp
 .DS_Store
+
+# Minecraft run directory
+logs/
+run/
