@@ -235,13 +235,22 @@ class RealCellPerformanceTest {
                     iterations);
             System.out.printf("  %-34s %-8s %10.2fx%n", "", "speedup", javaMicros / mirrorMicros);
 
-            var csField = NetworkStorage.class.getDeclaredField("nativeIndex");
-            csField.setAccessible(true);
-            var cs = (RustStorageIndex) csField.get(network);
-            if (cs != null) {
-                System.out.printf("  %-34s rebuilds %d | incremental %d%n", "counter maintenance",
-                        cs.counterStats[0], cs.counterStats[1]);
+            // Compare handling out the maintained counter directly against copying it into a
+            // caller-owned one, so the cost of the copy is visible.
+            var sharedField = NetworkStorage.class.getDeclaredField("nativeIndex");
+            sharedField.setAccessible(true);
+            var sharedMirror = (RustStorageIndex) sharedField.get(network);
+            if (sharedMirror != null) {
+                var sharedMicros = time(i -> {
+                    var shared = sharedMirror.getSharedAvailableStacks();
+                    if (shared == null || shared.isEmpty()) {
+                        throw new IllegalStateException();
+                    }
+                }, iterations);
+                report("shared counter, no copy", "mirror",
+                        (long) (sharedMicros * 1000 * iterations), iterations);
             }
+
             // Extract fan-out on the same network.
             var presentKey = keys.get(0);
             var absentKey = keys.get(keys.size() - 1);

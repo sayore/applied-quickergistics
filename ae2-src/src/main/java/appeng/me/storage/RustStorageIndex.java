@@ -185,8 +185,6 @@ public final class RustStorageIndex {
      * Revision {@link #maintainedCounter} reflects, or {@code -1} when it has to be rebuilt.
      */
     private long maintainedRevision = -1;
-    /** Diagnostic: number of full counter rebuilds and incremental updates. */
-    public final long[] counterStats = new long[2];
 
     /**
      * The mirror's own aggregate counter, brought up to date with the mounts.
@@ -336,7 +334,6 @@ public final class RustStorageIndex {
         var revisionAfter = index.deltaRevision();
         if (maintainedCounter == null || maintainedRevision != revisionBefore) {
             // No usable baseline: read the whole aggregate once and adopt the counter.
-            counterStats[0]++;
             maintainedCounter = toCounter(index.available());
             maintainedRevision = index.deltaRevision();
             return true;
@@ -347,12 +344,10 @@ public final class RustStorageIndex {
         var changes = index.deltasSince(revisionBefore);
         if (changes == null) {
             // The change log no longer covers the gap, so rebuild instead of guessing.
-            counterStats[0]++;
             maintainedCounter = toCounter(index.available());
             maintainedRevision = index.deltaRevision();
             return true;
         }
-        counterStats[1]++;
         var keys = interner.keys();
         for (var change : changes.changes()) {
             var key = keys.get(change.keyId());

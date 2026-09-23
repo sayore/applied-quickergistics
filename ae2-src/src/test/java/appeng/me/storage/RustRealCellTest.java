@@ -173,6 +173,43 @@ class RustRealCellTest {
         assertThat(extracted).isEqualTo(950);
     }
 
+    /**
+     * The counter the mirror hands out must describe the same network contents as the Java path.
+     * <p>
+     * {@code StorageService} adopts this counter instead of copying it, so an error here would show
+     * up as a wrong terminal or a wrong autocrafting decision, not as a crash.
+     */
+    @Test
+    void sharedCounterMatchesJavaAggregate() {
+        var first = driveCell(List.of(new ItemStack(Items.STONE, 100), new ItemStack(Items.DIRT, 50)));
+        var second = driveCell(List.of(new ItemStack(Items.STONE, 7)));
+        var network = new NetworkStorage();
+        network.mount(0, first);
+        network.mount(3, second);
+
+        var mirror = mirrorOf(network);
+        assertThat(mirror).as("the mirror must be enabled for this test").isNotNull();
+
+        // First query builds the maintained counter and hands it out.
+        var shared = mirror.getSharedAvailableStacks();
+        assertThat(shared).isNotNull();
+        assertSameContents(snapshot(shared), javaAggregate(List.of(first, second)));
+
+        // Repeated queries must return the same still-correct counter.
+        assertThat(mirror.getSharedAvailableStacks()).isSameAs(shared);
+        assertSameContents(snapshot(shared), javaAggregate(List.of(first, second)));
+    }
+
+    private static RustStorageIndex mirrorOf(NetworkStorage network) {
+        try {
+            var field = NetworkStorage.class.getDeclaredField("nativeIndex");
+            field.setAccessible(true);
+            return (RustStorageIndex) field.get(network);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     @Test
     void storageCellApiWrapsBasicInventory() {
         // Guards the assumption that a 64k item cell is a StorageCell that BasicCellInventory backs,

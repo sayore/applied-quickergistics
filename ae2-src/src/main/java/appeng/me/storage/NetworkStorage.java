@@ -253,6 +253,21 @@ public class NetworkStorage implements MEStorage {
     }
 
     /**
+     * The native mirror's maintained aggregate, or {@code null} when the mirror is unavailable.
+     * <p>
+     * The returned counter must be treated as read-only and must not be retained across ticks. It
+     * exists so a consumer that just needs the current content can avoid copying every entry.
+     */
+    @Nullable
+    public KeyCounter getSharedAvailableStacks() {
+        var index = this.nativeIndex;
+        if (index == null || mountsInUse) {
+            return null;
+        }
+        return index.getSharedAvailableStacks();
+    }
+
+    /**
      * Network-total changes since {@code sinceRevision}, for consumers that stay in sync tick by tick.
      * <p>
      * Returns {@code null} when the caller has to use {@link #getAvailableStacks(KeyCounter)} instead:
